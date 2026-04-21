@@ -7,6 +7,8 @@ Soporta turnos nocturnos usando Timestamps completos (YYYY-MM-DD HH:MM:SS).
 Incluye detección de olvidos y sección de corrección manual.
 """
 
+import ipaddress
+
 import streamlit as st
 import pandas as pd
 from datetime import datetime, date, time
@@ -43,7 +45,6 @@ EMPLEADOS_POR_AREA = {
         "Quishpe Jose",
         "Sanchez Karla",
         "Santiana Christhopper",
-        "Villacres Stefany",
     ],
     "DOCUMENTAL": [
         "Carvajal Omar",
@@ -53,10 +54,46 @@ EMPLEADOS_POR_AREA = {
         "Quingalombo Adrian",
         "Salinas Paola",
         "Taipe Angelo",
+        "Villacres Stefany",
     ],
 }
 AREAS = list(EMPLEADOS_POR_AREA.keys())
 AREA_DE = {emp: area for area, emps in EMPLEADOS_POR_AREA.items() for emp in emps}
+
+# PIN personal (últimos 4 dígitos de cédula) → nombre del empleado.
+# Si querés ocultar los PINs del repo público, movelos a secrets.toml → sección [pins].
+PIN_A_EMPLEADO = {
+    "3399": "Jaramillo Napoleon",
+    "7404": "Yanza Cristina",
+    "6607": "Almagro David",
+    "7536": "Almeida Carlos",
+    "9136": "Arellano Romel",
+    "5311": "Carvajal Omar",
+    "2183": "Chancusig Danilo",
+    "0025": "Collaguazo Darwin",
+    "1164": "Conforme Jordy",
+    "7916": "Farinango Nelson",
+    "8915": "Gonzaga Edison",
+    "1959": "Granda Melissa",
+    "4507": "Hidalgo Bolivar",
+    "0797": "Maldonado Patricio",
+    "0052": "Mariscal Juan",
+    "9836": "Monta Mayra",
+    "9206": "Nango Patricio",
+    "8676": "Panimboza Javier",
+    "0090": "Pazuna Pablo",
+    "8037": "Quingalombo Adrian",
+    "5442": "Quishpe Jose",
+    "1067": "Reyes Edgar",
+    "1133": "Rosario Diofer",
+    "0433": "Salinas Paola",
+    "1063": "Sanchez Karla",
+    "7455": "Santiana Christhopper",
+    "9745": "Taipe Angelo",
+    "3229": "Tipantiza Luis",
+    "1321": "Velasco Jorge",
+    "4903": "Villacres Stefany",
+}
 
 WORKSHEET_NAME = "Registros"
 COLUMNAS = [
@@ -85,62 +122,106 @@ st.set_page_config(page_title="Marcador de Horas", page_icon="⏰", layout="cent
 # ---------------------------------------------------------------------------
 # Control de acceso: IP allowlist + PIN de respaldo
 # ---------------------------------------------------------------------------
-def _obtener_ip_cliente() -> str:
-    """Lee la IP real del cliente del header X-Forwarded-For (seteado por el proxy de Streamlit Cloud)."""
+def _es_ip_publica(ip_str: str) -> bool:
+    """True si la IP es pública ruteable (no privada/loopback/reservada)."""
     try:
-        headers = st.context.headers
-        xff = headers.get("X-Forwarded-For") or headers.get("x-forwarded-for") or ""
-        if xff:
-            return xff.split(",")[0].strip()
-        return headers.get("X-Real-IP") or headers.get("x-real-ip") or ""
+        ip = ipaddress.ip_address(ip_str)
+        return not (
+            ip.is_private
+            or ip.is_loopback
+            or ip.is_link_local
+            or ip.is_reserved
+            or ip.is_multicast
+            or ip.is_unspecified
+        )
+    except ValueError:
+        return False
+
+
+def _leer_xff() -> str:
+    """Devuelve el contenido crudo del header X-Forwarded-For, o cadena vacía."""
+    try:
+        h = st.context.headers
+        return h.get("X-Forwarded-For") or h.get("x-forwarded-for") or ""
+    except Exception:
+        return ""
+
+
+def _obtener_ip_cliente() -> str:
+    """
+    Extrae la IP del cliente recorriendo X-Forwarded-For y devolviendo la primera IP
+    PÚBLICA. Los proxies pueden insertar IPs privadas al inicio de la cadena (ej.
+    LAN 192.168.x.x del cliente o infraestructura interna del cloud); esas se saltan.
+    """
+    xff = _leer_xff()
+    if xff:
+        for ip in (i.strip() for i in xff.split(",") if i.strip()):
+            if _es_ip_publica(ip):
+                return ip
+        # Si ninguna es pública, devolver la primera (mejor que nada para diagnóstico)
+        primeras = [i.strip() for i in xff.split(",") if i.strip()]
+        if primeras:
+            return primeras[0]
+    try:
+        h = st.context.headers
+        return h.get("X-Real-IP") or h.get("x-real-ip") or ""
     except Exception:
         return ""
 
 
 def check_access() -> None:
     """
-    1) Si la IP del cliente está en secrets.auth.allowed_ips → acceso directo.
-    2) Si no → pide PIN definido en secrets.auth.pin.
-    3) Sesión autorizada se mantiene hasta cerrar la pestaña.
+    1) Valida que la IP esté en secrets.auth.allowed_ips. Si no, bloquea.
+    2) Pide PIN personal (4 dígitos) → identifica al empleado → guarda usuario en sesión.
     """
     if st.session_state.get("auth_ok"):
         return
 
     auth_cfg = st.secrets.get("auth", {})
     allowed_ips = list(auth_cfg.get("allowed_ips", []))
-    pin_esperado = str(auth_cfg.get("pin", ""))
-
     ip_cliente = _obtener_ip_cliente()
 
-    if ip_cliente and ip_cliente in allowed_ips:
-        st.session_state["auth_ok"] = True
-        st.session_state["auth_via"] = f"IP ({ip_cliente})"
-        return
+    # -------- Paso 1: IP allowlist --------
+    # Si hay una lista configurada y detectamos una IP que no está en ella, bloquear.
+    # (Si ip_cliente está vacío —ej. corriendo local sin proxy— se permite seguir.)
+    if allowed_ips and ip_cliente and ip_cliente not in allowed_ips:
+        st.title("🚫 Acceso denegado")
+        st.error(
+            f"Tu IP (`{ip_cliente}`) no está autorizada. "
+            "El marcador solo puede usarse desde la red de la oficina. "
+            "Si necesitas acceso desde otra ubicación, contacta al administrador "
+            "para que agregue tu IP a la lista."
+        )
+        with st.expander("🔎 Detalles técnicos (para el administrador)"):
+            st.code(f"IP detectada: {ip_cliente}\nX-Forwarded-For: {_leer_xff() or '(vacío)'}")
+        st.stop()
 
-    # --- Gate de PIN ---
-    st.title("🔒 Acceso restringido")
-    if ip_cliente:
-        st.caption(f"Tu IP (`{ip_cliente}`) no está en la lista autorizada. Ingresa el PIN para continuar.")
-    else:
-        st.caption("No se pudo detectar tu IP. Ingresa el PIN para continuar.")
+    # -------- Paso 2: login por PIN personal --------
+    st.title("⏰ Marcador de Horas")
+    st.caption("Ingresa tu PIN personal (últimos 4 dígitos de tu cédula)")
 
-    pin = st.text_input("PIN", type="password", key="pin_input")
-    if st.button("🔓 Ingresar", type="primary"):
-        if not pin_esperado:
-            st.error("PIN no configurado en secrets.")
-        elif pin == pin_esperado:
-            st.session_state["auth_ok"] = True
-            st.session_state["auth_via"] = "PIN"
-            st.rerun()
+    pin = st.text_input(
+        "PIN",
+        type="password",
+        max_chars=4,
+        key="pin_input",
+        placeholder="••••",
+    )
+    if st.button("🔓 Ingresar", type="primary", use_container_width=True):
+        if not (pin.isdigit() and len(pin) == 4):
+            st.error("El PIN debe ser de 4 dígitos numéricos.")
+        elif pin not in PIN_A_EMPLEADO:
+            st.error("PIN incorrecto. Verifica con tu supervisor.")
         else:
-            st.error("PIN incorrecto.")
+            nombre = PIN_A_EMPLEADO[pin]
+            st.session_state["auth_ok"] = True
+            st.session_state["usuario"] = nombre
+            st.session_state["area"] = AREA_DE[nombre]
+            st.rerun()
     st.stop()
 
 
 check_access()
-
-st.title("⏰ Marcador de Entrada y Salida")
-st.caption(f"Acceso autorizado vía {st.session_state.get('auth_via', '-')}")
 
 conn = st.connection("gsheets", type=GSheetsConnection)
 
@@ -331,31 +412,44 @@ def render_formulario_justificacion() -> None:
 
 
 # ---------------------------------------------------------------------------
-# UI principal
+# UI principal — usuario ya autenticado
 # ---------------------------------------------------------------------------
-ca, ce = st.columns(2)
-with ca:
-    area = st.selectbox("🏢 Área", AREAS, key="area_main")
-with ce:
-    empleado = st.selectbox("👤 Empleado", EMPLEADOS_POR_AREA[area], key="emp_main")
+usuario = st.session_state["usuario"]
+area_usuario = st.session_state["area"]
+
+st.title("⏰ Marcador de Horas")
+
+ch1, ch2 = st.columns([3, 1])
+with ch1:
+    st.markdown(f"### 👤 {usuario}  \n🏢 **{area_usuario}**")
+with ch2:
+    if st.button("Cerrar sesión", use_container_width=True):
+        for k in ("auth_ok", "usuario", "area", "salida_pendiente"):
+            st.session_state.pop(k, None)
+        st.rerun()
+
+st.divider()
 
 col1, col2 = st.columns(2)
 with col1:
     if st.button("🟢 Marcar Entrada", use_container_width=True, type="primary"):
-        marcar_entrada(empleado)
+        marcar_entrada(usuario)
 with col2:
     if st.button("🔴 Marcar Salida", use_container_width=True):
-        marcar_salida(empleado)
+        marcar_salida(usuario)
 
 # Formulario de justificación (se muestra solo si hay salida pendiente por horas extra)
 render_formulario_justificacion()
 
 
 # ---------------------------------------------------------------------------
-# Sección de corrección de olvidos
+# Sección de corrección de olvidos — SOLO supervisores
 # ---------------------------------------------------------------------------
+if area_usuario != "SUPERVISORES":
+    st.stop()
+
 st.divider()
-with st.expander("🛠️ Corregir turno olvidado / Registro manual"):
+with st.expander("🛠️ Corregir turno olvidado / Registro manual (solo supervisores)"):
     st.caption(
         "Úsalo cuando un empleado olvidó marcar entrada, salida o ambas. "
         "Toda corrección queda registrada en 'Observaciones' para auditoría."
