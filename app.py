@@ -7,12 +7,11 @@ Soporta turnos nocturnos usando Timestamps completos (YYYY-MM-DD HH:MM:SS).
 Incluye detección de olvidos y sección de corrección manual.
 """
 
-import ipaddress
-
 import streamlit as st
 import pandas as pd
 from datetime import datetime, date, time
 from streamlit_gsheets import GSheetsConnection
+from streamlit_javascript import st_javascript
 
 # ---------------------------------------------------------------------------
 # Configuración
@@ -120,85 +119,34 @@ st.set_page_config(page_title="Marcador de Horas", page_icon="⏰", layout="cent
 
 
 # ---------------------------------------------------------------------------
-# Control de acceso: IP allowlist + PIN de respaldo
+# Control de acceso: device_key (URL) → IP pública desde browser → master password
 # ---------------------------------------------------------------------------
-def _es_ip_publica(ip_str: str) -> bool:
-    """True si la IP es pública ruteable (no privada/loopback/reservada)."""
+def _obtener_ip_publica_browser() -> str | None:
+    """
+    Ejecuta JS en el browser del cliente para consultar su IP pública real vía ipify.
+    Esto SÍ devuelve la IP real del cliente (no los proxies internos de Streamlit Cloud).
+    Retorna:
+      - None si aún no respondió (primer render). El caller debe st.stop().
+      - "" si ipify falló (sin internet, API caída). El caller cae a master password.
+      - str(ip) si respondió correctamente.
+    """
     try:
-        ip = ipaddress.ip_address(ip_str)
-        return not (
-            ip.is_private
-            or ip.is_loopback
-            or ip.is_link_local
-            or ip.is_reserved
-            or ip.is_multicast
-            or ip.is_unspecified
+        res = st_javascript(
+            "await fetch('https://api.ipify.org?format=json')"
+            ".then(r => r.json()).then(d => d.ip).catch(() => 'ERROR')",
+            key="client_ip_ipify",
         )
-    except ValueError:
-        return False
-
-
-# Headers donde típicamente aparece la IP pública del cliente, en orden de preferencia.
-# CF-Connecting-IP = Cloudflare (Streamlit Cloud va detrás de Cloudflare)
-# True-Client-IP = Cloudflare Enterprise / Akamai
-# X-Real-IP = nginx y varios proxies
-# X-Forwarded-For = estándar de facto (cadena de IPs, se recorre buscando la primera pública)
-CANDIDATOS_HEADER_IP = [
-    "CF-Connecting-IP",
-    "True-Client-IP",
-    "X-Real-IP",
-    "Fly-Client-IP",
-    "X-Client-IP",
-]
-
-
-def _leer_header(nombre: str) -> str:
-    try:
-        h = st.context.headers
-        return h.get(nombre) or h.get(nombre.lower()) or ""
     except Exception:
         return ""
 
-
-def _leer_xff() -> str:
-    return _leer_header("X-Forwarded-For")
-
-
-def _obtener_ip_cliente() -> str:
-    """
-    Busca la IP pública del cliente en los headers comunes. Recorre varios candidatos
-    porque cada proxy/CDN usa uno distinto. Descarta IPs privadas (LAN/NAT interno).
-    """
-    # 1) Headers de un solo valor
-    for nombre in CANDIDATOS_HEADER_IP:
-        val = _leer_header(nombre).strip()
-        if val and _es_ip_publica(val):
-            return val
-
-    # 2) X-Forwarded-For: cadena "ip1, ip2, ip3" → primera pública
-    xff = _leer_xff()
-    if xff:
-        ips = [i.strip() for i in xff.split(",") if i.strip()]
-        for ip in ips:
-            if _es_ip_publica(ip):
-                return ip
-        # Si ninguna pública, devolver la primera para al menos mostrar algo útil
-        if ips:
-            return ips[0]
-    return ""
+    # La primera vez que se renderiza, el componente aún no tiene valor → devuelve 0 o None.
+    if res in (0, None):
+        return None
+    if res == "ERROR" or not isinstance(res, str) or not res.strip():
+        return ""
+    return res.strip()
 
 
-def _dump_headers_ip() -> str:
-    """Devuelve los valores de todos los headers potencialmente útiles, para diagnóstico."""
-    try:
-        h = st.context.headers
-    except Exception:
-        return "(no disponible)"
-    lines = []
-    for nombre in CANDIDATOS_HEADER_IP + ["X-Forwarded-For", "X-Forwarded-Host", "Host"]:
-        v = h.get(nombre) or h.get(nombre.lower()) or ""
-        lines.append(f"{nombre}: {v or '(vacío)'}")
-    return "\n".join(lines)
 
 
 def check_access() -> None:
@@ -214,7 +162,6 @@ def check_access() -> None:
     allowed_ips = list(auth_cfg.get("allowed_ips", []))
     device_keys = list(auth_cfg.get("device_keys", []))
     master_password = str(auth_cfg.get("master_password", ""))
-    ip_cliente = _obtener_ip_cliente()
 
     # Token de dispositivo pasado por URL: ?device_key=XXX
     try:
@@ -222,34 +169,56 @@ def check_access() -> None:
     except Exception:
         device_key_url = ""
 
-    # -------- Capa 1: gate de dispositivo / red / contraseña maestra --------
+    # -------- Capa 1: gate de dispositivo / IP-oficina / contraseña maestra --------
     if not st.session_state.get("gate_passed"):
+        # 1) Token de dispositivo (PC fijo de oficina con URL bookmarkeada)
         if device_key_url and device_key_url in device_keys:
             st.session_state["gate_passed"] = True
             st.session_state["gate_via"] = "device_key"
-        elif bool(ip_cliente) and ip_cliente in allowed_ips:
-            st.session_state["gate_passed"] = True
-            st.session_state["gate_via"] = f"IP ({ip_cliente})"
         else:
-            st.title("🔒 Acceso al marcador")
-            st.caption(
-                "Esta sesión no proviene de una IP autorizada. "
-                "Ingresa la contraseña maestra para continuar."
-            )
-            pwd = st.text_input("Contraseña maestra", type="password", key="master_pwd_input")
-            if st.button("Continuar", type="primary", use_container_width=True):
-                if not master_password:
-                    st.error("Contraseña maestra no configurada en secrets.")
-                elif pwd == master_password:
-                    st.session_state["gate_passed"] = True
-                    st.session_state["gate_via"] = "master_password"
-                    st.rerun()
-                else:
-                    st.error("Contraseña maestra incorrecta.")
+            # 2) IP pública real del cliente (obtenida vía JS en el browser)
+            ip_browser = _obtener_ip_publica_browser()
 
-            with st.expander("🔎 Detalles técnicos"):
-                st.code(f"IP detectada: {ip_cliente or '(no detectada)'}\n\n--- Headers ---\n{_dump_headers_ip()}")
-            st.stop()
+            if ip_browser is None:
+                # Aún esperando respuesta del frontend
+                st.title("⏳ Verificando ubicación…")
+                st.caption("Un momento, confirmando que estás en la red autorizada.")
+                st.stop()
+
+            if ip_browser and ip_browser in allowed_ips:
+                st.session_state["gate_passed"] = True
+                st.session_state["gate_via"] = f"IP oficina ({ip_browser})"
+            else:
+                # 3) Fuera de oficina → contraseña maestra (supervisores/jefes)
+                st.title("🔒 Acceso al marcador")
+                if ip_browser:
+                    st.caption(
+                        f"Estás fuera de la red autorizada (tu IP: `{ip_browser}`). "
+                        "Si eres supervisor o jefe, ingresa la contraseña maestra."
+                    )
+                else:
+                    st.caption(
+                        "No se pudo verificar tu IP. "
+                        "Si eres supervisor o jefe, ingresa la contraseña maestra."
+                    )
+
+                pwd = st.text_input("Contraseña maestra", type="password", key="master_pwd_input")
+                if st.button("Continuar", type="primary", use_container_width=True):
+                    if not master_password:
+                        st.error("Contraseña maestra no configurada en secrets.")
+                    elif pwd == master_password:
+                        st.session_state["gate_passed"] = True
+                        st.session_state["gate_via"] = "master_password"
+                        st.rerun()
+                    else:
+                        st.error("Contraseña maestra incorrecta.")
+
+                with st.expander("🔎 Detalles técnicos"):
+                    st.code(
+                        f"IP pública (vía navegador): {ip_browser or '(no se pudo obtener)'}\n"
+                        f"IPs autorizadas: {allowed_ips}"
+                    )
+                st.stop()
 
     # -------- Capa 2: login por PIN personal --------
     st.title("⏰ Marcador de Horas")
