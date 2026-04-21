@@ -212,14 +212,24 @@ def check_access() -> None:
 
     auth_cfg = st.secrets.get("auth", {})
     allowed_ips = list(auth_cfg.get("allowed_ips", []))
+    device_keys = list(auth_cfg.get("device_keys", []))
     master_password = str(auth_cfg.get("master_password", ""))
     ip_cliente = _obtener_ip_cliente()
 
-    # -------- Capa 1: gate de red (IP o contraseña maestra) --------
+    # Token de dispositivo pasado por URL: ?device_key=XXX
+    try:
+        device_key_url = str(st.query_params.get("device_key", "") or "")
+    except Exception:
+        device_key_url = ""
+
+    # -------- Capa 1: gate de dispositivo / red / contraseña maestra --------
     if not st.session_state.get("gate_passed"):
-        ip_autorizada = bool(ip_cliente) and ip_cliente in allowed_ips
-        if ip_autorizada:
+        if device_key_url and device_key_url in device_keys:
             st.session_state["gate_passed"] = True
+            st.session_state["gate_via"] = "device_key"
+        elif bool(ip_cliente) and ip_cliente in allowed_ips:
+            st.session_state["gate_passed"] = True
+            st.session_state["gate_via"] = f"IP ({ip_cliente})"
         else:
             st.title("🔒 Acceso al marcador")
             st.caption(
@@ -232,6 +242,7 @@ def check_access() -> None:
                     st.error("Contraseña maestra no configurada en secrets.")
                 elif pwd == master_password:
                     st.session_state["gate_passed"] = True
+                    st.session_state["gate_via"] = "master_password"
                     st.rerun()
                 else:
                     st.error("Contraseña maestra incorrecta.")
@@ -468,7 +479,7 @@ with ch1:
     st.markdown(f"### 👤 {usuario}  \n🏢 **{area_usuario}**")
 with ch2:
     if st.button("Cerrar sesión", use_container_width=True):
-        for k in ("auth_ok", "gate_passed", "usuario", "area", "salida_pendiente"):
+        for k in ("auth_ok", "gate_passed", "gate_via", "usuario", "area", "salida_pendiente"):
             st.session_state.pop(k, None)
         st.rerun()
 
