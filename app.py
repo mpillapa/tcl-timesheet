@@ -138,35 +138,67 @@ def _es_ip_publica(ip_str: str) -> bool:
         return False
 
 
-def _leer_xff() -> str:
-    """Devuelve el contenido crudo del header X-Forwarded-For, o cadena vacía."""
+# Headers donde típicamente aparece la IP pública del cliente, en orden de preferencia.
+# CF-Connecting-IP = Cloudflare (Streamlit Cloud va detrás de Cloudflare)
+# True-Client-IP = Cloudflare Enterprise / Akamai
+# X-Real-IP = nginx y varios proxies
+# X-Forwarded-For = estándar de facto (cadena de IPs, se recorre buscando la primera pública)
+CANDIDATOS_HEADER_IP = [
+    "CF-Connecting-IP",
+    "True-Client-IP",
+    "X-Real-IP",
+    "Fly-Client-IP",
+    "X-Client-IP",
+]
+
+
+def _leer_header(nombre: str) -> str:
     try:
         h = st.context.headers
-        return h.get("X-Forwarded-For") or h.get("x-forwarded-for") or ""
+        return h.get(nombre) or h.get(nombre.lower()) or ""
     except Exception:
         return ""
+
+
+def _leer_xff() -> str:
+    return _leer_header("X-Forwarded-For")
 
 
 def _obtener_ip_cliente() -> str:
     """
-    Extrae la IP del cliente recorriendo X-Forwarded-For y devolviendo la primera IP
-    PÚBLICA. Los proxies pueden insertar IPs privadas al inicio de la cadena (ej.
-    LAN 192.168.x.x del cliente o infraestructura interna del cloud); esas se saltan.
+    Busca la IP pública del cliente en los headers comunes. Recorre varios candidatos
+    porque cada proxy/CDN usa uno distinto. Descarta IPs privadas (LAN/NAT interno).
     """
+    # 1) Headers de un solo valor
+    for nombre in CANDIDATOS_HEADER_IP:
+        val = _leer_header(nombre).strip()
+        if val and _es_ip_publica(val):
+            return val
+
+    # 2) X-Forwarded-For: cadena "ip1, ip2, ip3" → primera pública
     xff = _leer_xff()
     if xff:
-        for ip in (i.strip() for i in xff.split(",") if i.strip()):
+        ips = [i.strip() for i in xff.split(",") if i.strip()]
+        for ip in ips:
             if _es_ip_publica(ip):
                 return ip
-        # Si ninguna es pública, devolver la primera (mejor que nada para diagnóstico)
-        primeras = [i.strip() for i in xff.split(",") if i.strip()]
-        if primeras:
-            return primeras[0]
+        # Si ninguna pública, devolver la primera para al menos mostrar algo útil
+        if ips:
+            return ips[0]
+    return ""
+
+
+def _dump_headers_ip() -> str:
+    """Devuelve los valores de todos los headers potencialmente útiles, para diagnóstico."""
     try:
         h = st.context.headers
-        return h.get("X-Real-IP") or h.get("x-real-ip") or ""
     except Exception:
-        return ""
+        return "(no disponible)"
+    lines = []
+    for nombre in CANDIDATOS_HEADER_IP + ["X-Forwarded-For", "X-Forwarded-Host", "Host"]:
+        v = h.get(nombre) or h.get(nombre.lower()) or ""
+        lines.append(f"{nombre}: {v or '(vacío)'}")
+    return "\n".join(lines)
 
 
 def check_access() -> None:
@@ -193,7 +225,7 @@ def check_access() -> None:
             "para que agregue tu IP a la lista."
         )
         with st.expander("🔎 Detalles técnicos (para el administrador)"):
-            st.code(f"IP detectada: {ip_cliente}\nX-Forwarded-For: {_leer_xff() or '(vacío)'}")
+            st.code(f"IP detectada: {ip_cliente}\n\n--- Headers ---\n{_dump_headers_ip()}")
         st.stop()
 
     # -------- Paso 2: login por PIN personal --------
