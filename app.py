@@ -203,32 +203,44 @@ def _dump_headers_ip() -> str:
 
 def check_access() -> None:
     """
-    1) Valida que la IP esté en secrets.auth.allowed_ips. Si no, bloquea.
-    2) Pide PIN personal (4 dígitos) → identifica al empleado → guarda usuario en sesión.
+    Flujo de acceso en dos capas:
+      1) Gate de red: IP en allowed_ips → pasa; si no, pide contraseña maestra.
+      2) Login de empleado: siempre requiere PIN personal de 4 dígitos.
     """
     if st.session_state.get("auth_ok"):
         return
 
     auth_cfg = st.secrets.get("auth", {})
     allowed_ips = list(auth_cfg.get("allowed_ips", []))
+    master_password = str(auth_cfg.get("master_password", ""))
     ip_cliente = _obtener_ip_cliente()
 
-    # -------- Paso 1: IP allowlist --------
-    # Si hay una lista configurada y detectamos una IP que no está en ella, bloquear.
-    # (Si ip_cliente está vacío —ej. corriendo local sin proxy— se permite seguir.)
-    if allowed_ips and ip_cliente and ip_cliente not in allowed_ips:
-        st.title("🚫 Acceso denegado")
-        st.error(
-            f"Tu IP (`{ip_cliente}`) no está autorizada. "
-            "El marcador solo puede usarse desde la red de la oficina. "
-            "Si necesitas acceso desde otra ubicación, contacta al administrador "
-            "para que agregue tu IP a la lista."
-        )
-        with st.expander("🔎 Detalles técnicos (para el administrador)"):
-            st.code(f"IP detectada: {ip_cliente}\n\n--- Headers ---\n{_dump_headers_ip()}")
-        st.stop()
+    # -------- Capa 1: gate de red (IP o contraseña maestra) --------
+    if not st.session_state.get("gate_passed"):
+        ip_autorizada = bool(ip_cliente) and ip_cliente in allowed_ips
+        if ip_autorizada:
+            st.session_state["gate_passed"] = True
+        else:
+            st.title("🔒 Acceso al marcador")
+            st.caption(
+                "Esta sesión no proviene de una IP autorizada. "
+                "Ingresa la contraseña maestra para continuar."
+            )
+            pwd = st.text_input("Contraseña maestra", type="password", key="master_pwd_input")
+            if st.button("Continuar", type="primary", use_container_width=True):
+                if not master_password:
+                    st.error("Contraseña maestra no configurada en secrets.")
+                elif pwd == master_password:
+                    st.session_state["gate_passed"] = True
+                    st.rerun()
+                else:
+                    st.error("Contraseña maestra incorrecta.")
 
-    # -------- Paso 2: login por PIN personal --------
+            with st.expander("🔎 Detalles técnicos"):
+                st.code(f"IP detectada: {ip_cliente or '(no detectada)'}\n\n--- Headers ---\n{_dump_headers_ip()}")
+            st.stop()
+
+    # -------- Capa 2: login por PIN personal --------
     st.title("⏰ Marcador de Horas")
     st.caption("Ingresa tu PIN personal (últimos 4 dígitos de tu cédula)")
 
@@ -456,7 +468,7 @@ with ch1:
     st.markdown(f"### 👤 {usuario}  \n🏢 **{area_usuario}**")
 with ch2:
     if st.button("Cerrar sesión", use_container_width=True):
-        for k in ("auth_ok", "usuario", "area", "salida_pendiente"):
+        for k in ("auth_ok", "gate_passed", "usuario", "area", "salida_pendiente"):
             st.session_state.pop(k, None)
         st.rerun()
 
