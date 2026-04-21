@@ -46,7 +46,11 @@ def logout() -> None:
 # Capa 1: gate de red
 # ---------------------------------------------------------------------------   
 def _capa1_gate() -> None:
-    auth_cfg = st.secrets.get("auth", {})
+    try:
+        auth_cfg = dict(st.secrets["auth"])
+    except (KeyError, FileNotFoundError):
+        auth_cfg = {}
+        
     allowed_ips = list(auth_cfg.get("allowed_ips", []))
     device_keys = list(auth_cfg.get("device_keys", []))
     master_password = str(auth_cfg.get("master_password", ""))
@@ -134,7 +138,10 @@ def _capa3_login_colaborador() -> None:
 
 
 def _capa3_login_super_admin() -> None:
-    super_admins = dict(st.secrets.get("super_admins", {}))
+    try:
+        super_admins = dict(st.secrets["super_admins"])
+    except (KeyError, FileNotFoundError):
+        super_admins = {}
 
     st.title("⏱️ Administrador")
     if st.button("← Volver al Marcador", key="back_colab"):

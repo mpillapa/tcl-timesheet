@@ -19,7 +19,11 @@ import streamlit as st
 
 
 def _cargar():
-    data = dict(st.secrets.get("empleados", {}))
+    try:
+        data = dict(st.secrets["empleados"])
+    except (KeyError, FileNotFoundError):
+        data = {}
+        
     pin_a_emp = {}
     emp_por_area = {}
     area_de = {}
