@@ -124,7 +124,8 @@ def _render_correcciones() -> None:
     with ca_corr:
         area_corr = st.selectbox("Área", AREAS, key="area_corr")
     with ce_corr:
-        emp_corr = st.selectbox("Empleado a corregir", EMPLEADOS_POR_AREA[area_corr], key="emp_corr")
+        lista_empleados = EMPLEADOS_POR_AREA.get(area_corr, []) if area_corr else []
+        emp_corr = st.selectbox("Empleado a corregir", lista_empleados, key="emp_corr")
 
     modo = st.radio(
         "¿Qué quieres hacer?",
