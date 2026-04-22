@@ -13,6 +13,7 @@ from data import (
     buscar_turno_abierto_idx,
 )
 from employees import AREA_DE
+from time_utils import now_ecuador
 
 
 def guardar_salida(df, idx, ts_salida, horas, observacion):
@@ -29,8 +30,8 @@ def marcar_entrada(nombre: str) -> None:
     idx_abierto = buscar_turno_abierto_idx(df, nombre)
 
     if idx_abierto is not None:
-        ts_prev = pd.to_datetime(df.loc[idx_abierto, "Timestamp Entrada"])
-        horas_abiertas = (datetime.now() - ts_prev).total_seconds() / 3600
+        ts_prev = datetime.strptime(str(df.loc[idx_abierto, "Timestamp Entrada"]), TS_FMT)
+        horas_abiertas = (now_ecuador() - ts_prev).total_seconds() / 3600
         if horas_abiertas > UMBRAL_OLVIDO_H:
             st.error(
                 f"⚠️ Parece que **{nombre}** olvidó marcar salida del turno iniciado el "
@@ -44,7 +45,7 @@ def marcar_entrada(nombre: str) -> None:
             )
         return
 
-    ahora = datetime.now()
+    ahora = now_ecuador()
     nueva = pd.DataFrame([{
         "Nombre": nombre,
         "Area": AREA_DE.get(nombre, ""),
@@ -70,8 +71,8 @@ def marcar_salida(nombre: str) -> None:
         )
         return
 
-    ahora = datetime.now()
-    ts_entrada = pd.to_datetime(df.loc[idx, "Timestamp Entrada"])
+    ahora = now_ecuador()
+    ts_entrada = datetime.strptime(str(df.loc[idx, "Timestamp Entrada"]), TS_FMT)
     horas = calcular_horas(ts_entrada, ahora)
 
     # Si excede el umbral, diferir guardado y pedir justificación en otro render.

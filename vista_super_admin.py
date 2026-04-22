@@ -6,6 +6,7 @@ from data import leer_registros, escribir_registros, calcular_horas, buscar_turn
 from employees import AREAS, EMPLEADOS_POR_AREA, AREA_DE
 from config import UMBRAL_HORAS_EXTRA, TS_FMT, MIN_JUSTIF_CHARS
 from marcado import guardar_salida
+from time_utils import now_ecuador, today_ecuador
 
 def _preparar_df_dashboard(df: pd.DataFrame) -> pd.DataFrame:
     """Convierte columnas a tipos aptos para análisis/gráficos."""
@@ -25,7 +26,7 @@ def _sidebar_filtros(df: pd.DataFrame) -> pd.DataFrame:
         fmin = fechas_validas.min()
         fmax = fechas_validas.max()
     else:
-        fmin = fmax = date.today()
+        fmin = fmax = today_ecuador()
 
     rango = st.sidebar.date_input(
         "Rango de fechas de turno",
@@ -108,7 +109,7 @@ def _render_tabla(df: pd.DataFrame) -> None:
     st.download_button(
         "📥 Descargar CSV",
         data=csv,
-        file_name=f"registros_{date.today().isoformat()}.csv",
+        file_name=f"registros_{today_ecuador().isoformat()}.csv",
         mime="text/csv",
         use_container_width=True,
     )
@@ -137,7 +138,7 @@ def _render_correcciones() -> None:
     )
 
     df_actual = leer_registros()
-    ahora_min = datetime.now().replace(second=0, microsecond=0).time()
+    ahora_min = now_ecuador().replace(second=0, microsecond=0).time()
 
     if modo.startswith("Cerrar"):
         df_abiertos = df_actual[
@@ -155,7 +156,7 @@ def _render_correcciones() -> None:
 
             c1, c2 = st.columns(2)
             with c1:
-                f_sal = st.date_input("Fecha de salida", value=date.today(), key="f_sal_close")
+                f_sal = st.date_input("Fecha de salida", value=today_ecuador(), key="f_sal_close")
             with c2:
                 h_sal = st.time_input("Hora de salida", value=ahora_min, key="h_sal_close")
 
@@ -193,11 +194,11 @@ def _render_correcciones() -> None:
         c1, c2 = st.columns(2)
         with c1:
             st.markdown("**Entrada**")
-            f_ent = st.date_input("Fecha", value=date.today(), key="f_ent_m")   
+            f_ent = st.date_input("Fecha", value=today_ecuador(), key="f_ent_m")   
             h_ent = st.time_input("Hora", value=time(7, 0), key="h_ent_m")      
         with c2:
             st.markdown("**Salida**")
-            f_sal = st.date_input("Fecha", value=date.today(), key="f_sal_m")   
+            f_sal = st.date_input("Fecha", value=today_ecuador(), key="f_sal_m")   
             h_sal = st.time_input("Hora", value=time(17, 0), key="h_sal_m")     
 
         st.markdown("**Observación** (el prefijo *Registro manual:* se añade automáticamente)")
