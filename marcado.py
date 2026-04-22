@@ -22,6 +22,16 @@ from time_utils import now_ecuador
 AUTO_LOGOUT_SECONDS = 5
 
 
+def _parse_timestamp_flexible(raw_ts: str) -> datetime | None:
+    """Parsea timestamps desde varios formatos que puede devolver Sheets."""
+    ts = pd.to_datetime(raw_ts, errors="coerce")
+    if pd.isna(ts):
+        ts = pd.to_datetime(raw_ts, errors="coerce", dayfirst=True)
+    if pd.isna(ts):
+        return None
+    return ts.to_pydatetime()
+
+
 def programar_cierre_sesion() -> None:
     """Activa cierre automático de sesión tras una marcación exitosa."""
     st.session_state["auto_logout_started_at"] = time.time()
@@ -45,7 +55,10 @@ def marcar_entrada(nombre: str) -> None:
     idx_abierto = buscar_turno_abierto_idx(df, nombre)
 
     if idx_abierto is not None:
-        ts_prev = datetime.strptime(str(df.loc[idx_abierto, "Timestamp Entrada"]), TS_FMT)
+        ts_prev = _parse_timestamp_flexible(str(df.loc[idx_abierto, "Timestamp Entrada"]))
+        if ts_prev is None:
+            st.error("No se pudo interpretar la hora de entrada del turno abierto. Contacta a tu supervisor.")
+            return
         horas_abiertas = (now_ecuador() - ts_prev).total_seconds() / 3600
         if horas_abiertas > UMBRAL_OLVIDO_H:
             st.error(
@@ -89,7 +102,10 @@ def marcar_salida(nombre: str) -> None:
 
     ahora = now_ecuador()
     ts_entrada_str = str(df.loc[idx, "Timestamp Entrada"])
-    ts_entrada = datetime.strptime(ts_entrada_str, TS_FMT)
+    ts_entrada = _parse_timestamp_flexible(ts_entrada_str)
+    if ts_entrada is None:
+        st.error("No se pudo interpretar la hora de entrada del turno. Contacta a tu supervisor.")
+        return
     horas = calcular_horas(ts_entrada, ahora)
 
     # Si excede el umbral, diferir guardado y pedir justificación en otro render.

@@ -255,11 +255,30 @@ def _aplicar_scope_admin(df: pd.DataFrame, admin_user: str) -> pd.DataFrame:
 def _preparar_df_dashboard(df: pd.DataFrame) -> pd.DataFrame:
     """Convierte columnas a tipos aptos para análisis/gráficos."""
     d = df.copy()
-    d["Fecha de Turno"] = pd.to_datetime(d["Fecha de Turno"], errors="coerce").dt.date
-    d["Timestamp Entrada"] = pd.to_datetime(d["Timestamp Entrada"], errors="coerce")
-    d["Timestamp Salida"] = pd.to_datetime(d["Timestamp Salida"], errors="coerce")
-    d["Horas Trabajadas"] = pd.to_numeric(d["Horas Trabajadas"], errors="coerce")
-    d["Horas Extra"] = pd.to_numeric(d.get("Horas Extra"), errors="coerce")
+
+    def _parse_dt_series(series: pd.Series, only_date: bool = False) -> pd.Series:
+        dt = pd.to_datetime(series, errors="coerce")
+        mask = dt.isna()
+        if mask.any():
+            dt_alt = pd.to_datetime(series[mask], errors="coerce", dayfirst=True)
+            dt.loc[mask] = dt_alt
+        return dt.dt.date if only_date else dt
+
+    def _parse_num_series(series: pd.Series) -> pd.Series:
+        s = series.astype(str).str.strip()
+        s = s.str.replace(" ", "", regex=False)
+        s = s.str.replace(",", ".", regex=False)
+        return pd.to_numeric(s, errors="coerce")
+
+    d["Fecha de Turno"] = _parse_dt_series(d["Fecha de Turno"], only_date=True)
+    d["Timestamp Entrada"] = _parse_dt_series(d["Timestamp Entrada"])
+    d["Timestamp Salida"] = _parse_dt_series(d["Timestamp Salida"])
+
+    d["Estado"] = d["Estado"].fillna("").astype(str).str.strip().str.casefold()
+    d["Estado"] = d["Estado"].replace({"completo": "Completo", "abierto": "Abierto"})
+
+    d["Horas Trabajadas"] = _parse_num_series(d["Horas Trabajadas"])
+    d["Horas Extra"] = _parse_num_series(d.get("Horas Extra", pd.Series(index=d.index, dtype=object)))
     mask_falta_extra = d["Horas Trabajadas"].notna() & d["Horas Extra"].isna()
     if mask_falta_extra.any():
         d.loc[mask_falta_extra, "Horas Extra"] = d.loc[mask_falta_extra, "Horas Trabajadas"].apply(calcular_horas_extra)

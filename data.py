@@ -22,6 +22,7 @@ _SA_KEYS = {
 
 _worksheet = None
 _header_cache = None
+_datetime_format_applied = False
 
 
 _INVISIBLE_RE = re.compile(r"[\u200B\u200C\u200D\u2060\uFEFF]")
@@ -75,6 +76,52 @@ def _get_header() -> list:
     ws = _get_worksheet()
     _header_cache = ws.row_values(1)
     return _header_cache
+
+
+def _aplicar_formato_fecha_hora() -> None:
+    """Aplica formato de fecha/hora a columnas de timestamps en Google Sheets.
+
+    Se ejecuta una sola vez por sesión de app para evitar requests repetitivos.
+    """
+    global _datetime_format_applied
+    if _datetime_format_applied:
+        return
+
+    ws = _get_worksheet()
+    header = _get_header()
+    requests = []
+
+    def _add_format_request(col_name: str, pattern: str) -> None:
+        if col_name not in header:
+            return
+        col_idx = header.index(col_name)
+        requests.append({
+            "repeatCell": {
+                "range": {
+                    "sheetId": ws.id,
+                    "startRowIndex": 1,
+                    "startColumnIndex": col_idx,
+                    "endColumnIndex": col_idx + 1,
+                },
+                "cell": {
+                    "userEnteredFormat": {
+                        "numberFormat": {
+                            "type": "DATE_TIME",
+                            "pattern": pattern,
+                        }
+                    }
+                },
+                "fields": "userEnteredFormat.numberFormat",
+            }
+        })
+
+    _add_format_request("Fecha de Turno", "yyyy-mm-dd")
+    _add_format_request("Timestamp Entrada", "yyyy-mm-dd hh:mm:ss")
+    _add_format_request("Timestamp Salida", "yyyy-mm-dd hh:mm:ss")
+
+    if requests:
+        ws.spreadsheet.batch_update({"requests": requests})
+    _datetime_format_applied = True
 
 
 def leer_registros() -> pd.DataFrame:
@@ -131,9 +178,10 @@ def append_registro(fila: dict) -> None:
     autodetect de Sheets falla.
     """
     ws = _get_worksheet()
+    _aplicar_formato_fecha_hora()
     header = _get_header()
     row_values = [fila.get(col, "") for col in header]
-    ws.append_row(row_values, value_input_option="RAW", table_range="A1")
+    ws.append_row(row_values, value_input_option="USER_ENTERED", table_range="A1")
 
 
 def _ts_key(raw) -> str:
@@ -165,6 +213,7 @@ def actualizar_por_entrada(nombre: str, ts_entrada_str: str, cambios: dict) -> b
     Entrada se modifican nunca tras la creación.
     """
     ws = _get_worksheet()
+    _aplicar_formato_fecha_hora()
     all_values = ws.get_all_values()
     if len(all_values) < 2:
         return False
@@ -198,7 +247,7 @@ def actualizar_por_entrada(nombre: str, ts_entrada_str: str, cambios: dict) -> b
         a1 = gspread.utils.rowcol_to_a1(target_row, col_idx)
         updates.append({"range": a1, "values": [[val if val is not None else ""]]})
     if updates:
-        ws.batch_update(updates, value_input_option="RAW")
+        ws.batch_update(updates, value_input_option="USER_ENTERED")
     return True
 
 
