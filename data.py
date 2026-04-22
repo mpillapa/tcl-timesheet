@@ -6,15 +6,13 @@ que escrituras concurrentes de distintos usuarios se pisen entre sí.
 """
 
 from datetime import datetime
+import re
 
 import gspread
 import pandas as pd
 import streamlit as st
-from streamlit_gsheets import GSheetsConnection
 
 from config import COLUMNAS, COLS_TEXTO, HORAS_BASE_TURNO, WORKSHEET_NAME
-
-_conn = st.connection("gsheets", type=GSheetsConnection)
 
 _SA_KEYS = {
     "type", "project_id", "private_key_id", "private_key",
@@ -24,6 +22,27 @@ _SA_KEYS = {
 
 _worksheet = None
 _header_cache = None
+
+
+_INVISIBLE_RE = re.compile(r"[\u200B\u200C\u200D\u2060\uFEFF]")
+
+
+def _normalizar_texto(value) -> str:
+    """Normaliza textos para comparaciones robustas.
+
+    Elimina caracteres invisibles (zero-width/BOM), compacta espacios y
+    recorta extremos para evitar falsos negativos en comparaciones exactas.
+    """
+    s = str(value or "")
+    s = _INVISIBLE_RE.sub("", s)
+    s = s.replace("\u00A0", " ")
+    s = re.sub(r"\s+", " ", s)
+    return s.strip()
+
+
+def _normalizar_cmp(value) -> str:
+    """Normalización para comparaciones textuales case-insensitive."""
+    return _normalizar_texto(value).casefold()
 
 
 def _get_worksheet():
@@ -59,16 +78,33 @@ def _get_header() -> list:
 
 
 def leer_registros() -> pd.DataFrame:
-    """Lee la hoja forzando 'object' en columnas de texto (evita TypeError al escribir strings en columnas float)."""
+    """Lee la hoja forzando 'object' en columnas de texto (evita TypeError al
+    escribir strings en columnas float) y normalizando espacios en los
+    headers y en los valores de texto (evita que un ' ' invisible en una
+    celda haga fallar las comparaciones == 'Abierto' o == nombre)."""
     try:
-        df = _conn.read(worksheet=WORKSHEET_NAME, ttl=0)
-        df = df.dropna(how="all")
+        ws = _get_worksheet()
+        values = ws.get_all_values()
+        if not values:
+            return pd.DataFrame({c: pd.Series(dtype=object) for c in COLUMNAS})
+
+        header = [_normalizar_texto(c) for c in values[0]]
+        rows = values[1:]
+        if rows:
+            ancho = len(header)
+            rows = [r[:ancho] + [""] * max(0, ancho - len(r)) for r in rows]
+            df = pd.DataFrame(rows, columns=header)
+            df = df[df.apply(lambda row: any(_normalizar_texto(v) for v in row), axis=1)]
+        else:
+            df = pd.DataFrame(columns=header)
+
         for col in COLUMNAS:
             if col not in df.columns:
                 df[col] = ""
         df = df[COLUMNAS].copy()
         for col in COLS_TEXTO:
             df[col] = df[col].astype(object).where(df[col].notna(), "")
+            df[col] = df[col].map(_normalizar_texto)
 
         # Compatibilidad: si hay filas antiguas sin "Horas Extra", se calcula en memoria.
         horas_num = pd.to_numeric(df["Horas Trabajadas"], errors="coerce")
@@ -100,6 +136,26 @@ def append_registro(fila: dict) -> None:
     ws.append_row(row_values, value_input_option="RAW", table_range="A1")
 
 
+def _ts_key(raw) -> str:
+    """Normaliza un timestamp a 'YYYY-MM-DD HH:MM:SS' para comparar de forma
+    robusta entre:
+      - strings escritos con RAW (formato canónico),
+      - celdas datetime-typed legacy cuyo display depende del locale
+        (ej. '22/4/2026 9:00:00' en es-EC).
+    Si no se puede parsear, devuelve el valor en bruto como fallback.
+    """
+    s = _normalizar_texto(raw)
+    if not s:
+        return ""
+    try:
+        return pd.to_datetime(s).strftime("%Y-%m-%d %H:%M:%S")
+    except Exception:
+        try:
+            return pd.to_datetime(s, dayfirst=True).strftime("%Y-%m-%d %H:%M:%S")
+        except Exception:
+            return s
+
+
 def actualizar_por_entrada(nombre: str, ts_entrada_str: str, cambios: dict) -> bool:
     """Actualiza SOLO las celdas indicadas en `cambios` de la fila que matchea
     (Nombre, Timestamp Entrada). Devuelve False si la fila no existe.
@@ -120,11 +176,15 @@ def actualizar_por_entrada(nombre: str, ts_entrada_str: str, cambios: dict) -> b
     except ValueError:
         return False
 
+    nombre_norm = _normalizar_cmp(nombre)
+    key = _ts_key(ts_entrada_str)
     target_row = None  # índice 1-based en la hoja (fila 1 = header)
     for offset, row in enumerate(all_values[1:], start=2):
-        if (i_nombre < len(row) and i_entrada < len(row)
-                and row[i_nombre] == nombre
-                and str(row[i_entrada]) == str(ts_entrada_str)):
+        if i_nombre >= len(row) or i_entrada >= len(row):
+            continue
+        if _normalizar_cmp(row[i_nombre]) != nombre_norm:
+            continue
+        if _ts_key(row[i_entrada]) == key:
             target_row = offset
             break
     if target_row is None:
@@ -151,9 +211,29 @@ def calcular_horas_extra(horas_trabajadas: float) -> float:
 
 
 def buscar_turno_abierto_idx(df: pd.DataFrame, nombre: str):
-    """Devuelve el índice del turno abierto del empleado, o None."""
+    """Devuelve el índice del turno abierto del empleado, o None.
+
+    Incluye un fallback para filas legacy que quedaron con "Abierto" en la
+    columna Observaciones y Estado vacío, producto de un bug histórico de
+    desalineo de columnas (ya corregido). Sin este fallback esas filas
+    quedarían inmarcables (imposible cerrar el turno). Al cerrarlas, las
+    celdas Estado y Observaciones se sobrescriben con valores correctos, así
+    que la fila se auto-repara en el próximo marcado de salida.
+    """
     if df.empty:
         return None
-    mask = (df["Nombre"] == nombre) & (df["Estado"] == "Abierto")
-    idxs = df.index[mask].tolist()
+
+    nombre_norm = _normalizar_cmp(nombre)
+    df_nombre = df["Nombre"].fillna("").map(_normalizar_cmp)
+    estado = df["Estado"].fillna("").map(_normalizar_cmp)
+    obs = df["Observaciones"].fillna("").map(_normalizar_cmp)
+    nombre_mask = df_nombre == nombre_norm
+
+    primary = nombre_mask & (estado == "abierto")
+    idxs = df.index[primary].tolist()
+    if idxs:
+        return idxs[0]
+
+    legacy = nombre_mask & (obs == "abierto") & (estado == "")
+    idxs = df.index[legacy].tolist()
     return idxs[0] if idxs else None

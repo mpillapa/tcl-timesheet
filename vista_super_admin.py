@@ -547,9 +547,13 @@ def _render_correcciones(areas_permitidas=None) -> None:
     ahora_min = now_ecuador().replace(second=0, microsecond=0).time()
 
     if modo.startswith("Cerrar"):
-        df_abiertos = df_actual[
-            (df_actual["Nombre"] == emp_corr) & (df_actual["Estado"] == "Abierto")
-        ]
+        emp_norm = str(emp_corr).strip()
+        _nombre = df_actual["Nombre"].fillna("").astype(str).str.strip()
+        _estado = df_actual["Estado"].fillna("").astype(str).str.strip()
+        _obs = df_actual["Observaciones"].fillna("").astype(str).str.strip()
+        mask_primary = (_nombre == emp_norm) & (_estado == "Abierto")
+        mask_legacy = (_nombre == emp_norm) & (_obs == "Abierto") & (_estado == "")
+        df_abiertos = df_actual[mask_primary | mask_legacy]
         if df_abiertos.empty:
             st.info(f"{emp_corr} no tiene turnos abiertos.")
         else:
