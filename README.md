@@ -34,7 +34,7 @@ pip install -r requirements.txt
 1. Crea una hoja nueva en Google Sheets.
 2. Renombra la pestaña a **`Registros`**.
 3. En la fila 1 escribe estos encabezados (en el orden exacto):
-   `Nombre | Tipo de Marca | Timestamp | Fecha de Turno | Horas Trabajadas`
+   `Nombre | Area | Fecha de Turno | Timestamp Entrada | Timestamp Salida | Horas Trabajadas | Horas Extra | Estado | Observaciones`
 4. Copia el ID del spreadsheet (lo que va entre `/d/` y `/edit` en la URL).
 
 ### 3. Crear el Service Account en Google Cloud

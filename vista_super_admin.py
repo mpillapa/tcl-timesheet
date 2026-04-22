@@ -1,12 +1,256 @@
 import streamlit as st
 import pandas as pd
+import altair as alt
 from datetime import datetime, date, time
 from auth import logout
-from data import leer_registros, escribir_registros, calcular_horas, buscar_turno_abierto_idx
+from data import (
+    leer_registros,
+    escribir_registros,
+    calcular_horas,
+    calcular_horas_extra,
+    buscar_turno_abierto_idx,
+)
 from employees import AREAS, EMPLEADOS_POR_AREA, AREA_DE
-from config import UMBRAL_HORAS_EXTRA, TS_FMT, MIN_JUSTIF_CHARS
+from config import UMBRAL_HORAS_EXTRA, TS_FMT, MIN_JUSTIF_CHARS, HORAS_BASE_TURNO
 from marcado import guardar_salida
 from time_utils import now_ecuador, today_ecuador
+
+
+BRAND_NAVY = "#1E2D78"
+BRAND_NAVY_MID = "#3A4BA0"
+BRAND_NAVY_SOFT = "#8A96C9"
+BRAND_RED = "#D8202F"
+BRAND_RED_SOFT = "#F5C4C8"
+BRAND_BG_SOFT = "#F4F6FC"
+BRAND_TEXT = "#1B1F3B"
+BRAND_MUTED = "#6B7280"
+
+BRAND_CATEGORICAL = [
+    BRAND_NAVY,
+    BRAND_RED,
+    BRAND_NAVY_MID,
+    "#2F9E8F",
+    "#E08E2B",
+    BRAND_NAVY_SOFT,
+    "#7A5CA6",
+    "#4B5B8F",
+]
+
+
+def _inject_brand_css() -> None:
+    st.markdown(
+        f"""
+        <style>
+            .block-container {{
+                max-width: 1400px !important;
+                padding-top: 1.2rem;
+                padding-left: 2.5rem;
+                padding-right: 2.5rem;
+            }}
+            h1, h2, h3 {{ color: {BRAND_NAVY}; }}
+            h1 {{ font-size: 1.75rem !important; margin-bottom: 0.6rem !important; }}
+            h3 {{ font-size: 1.1rem !important; }}
+
+            .stTabs [data-baseweb="tab-list"] {{
+                gap: 6px;
+                border-bottom: 2px solid {BRAND_BG_SOFT};
+                margin-bottom: 1rem;
+            }}
+            .stTabs [data-baseweb="tab"] {{
+                background: {BRAND_BG_SOFT};
+                border-radius: 10px 10px 0 0;
+                padding: 10px 20px;
+                color: {BRAND_NAVY};
+                font-weight: 600;
+            }}
+            .stTabs [aria-selected="true"] {{
+                background: {BRAND_NAVY} !important;
+                color: #FFFFFF !important;
+            }}
+
+            .brand-header {{
+                display:flex; align-items:center; justify-content:space-between;
+                gap:14px; padding: 14px 20px; border-radius: 14px;
+                background: linear-gradient(90deg, {BRAND_NAVY} 0%, {BRAND_NAVY_MID} 100%);
+                color: #FFFFFF;
+                box-shadow: 0 4px 14px rgba(30,45,120,0.18);
+            }}
+            .brand-header .user-block {{
+                display:flex; align-items:center; gap:14px;
+            }}
+            .brand-header .avatar {{
+                width:44px; height:44px; border-radius:50%;
+                background: rgba(255,255,255,0.18);
+                display:flex; align-items:center; justify-content:center;
+                font-size:1.3rem;
+            }}
+            .brand-header .uname {{
+                font-size:1.05rem; font-weight:700; line-height:1.2;
+            }}
+            .brand-header .role {{
+                background: rgba(255,255,255,0.18);
+                padding: 3px 12px; border-radius: 999px;
+                font-size: 0.8rem; font-weight:500;
+                display:inline-block; margin-top:3px;
+            }}
+
+            .kpi-grid {{
+                display: grid;
+                grid-template-columns: repeat(auto-fit, minmax(210px, 1fr));
+                gap: 16px;
+                margin: 8px 0 10px;
+            }}
+            .kpi-card {{
+                background: #FFFFFF;
+                border: 1px solid #E6E9F4;
+                border-radius: 14px;
+                padding: 18px 20px;
+                display: flex;
+                gap: 14px;
+                align-items: flex-start;
+                box-shadow: 0 2px 6px rgba(30,45,120,0.05);
+                transition: transform .18s ease, box-shadow .18s ease;
+            }}
+            .kpi-card:hover {{
+                transform: translateY(-2px);
+                box-shadow: 0 8px 20px rgba(30,45,120,0.10);
+            }}
+            .kpi-icon {{
+                width: 46px; height: 46px; border-radius: 12px;
+                display: flex; align-items: center; justify-content: center;
+                font-size: 1.35rem; flex: 0 0 46px;
+            }}
+            .kpi-body {{ flex: 1; min-width: 0; }}
+            .kpi-label {{
+                color: {BRAND_MUTED}; font-size: .75rem; font-weight: 600;
+                text-transform: uppercase; letter-spacing: .06em;
+            }}
+            .kpi-value {{
+                color: {BRAND_NAVY}; font-size: 1.85rem; font-weight: 800;
+                line-height: 1.15; margin-top: 2px;
+            }}
+            .kpi-value .unit {{
+                font-size: .95rem; font-weight: 600; color: {BRAND_MUTED}; margin-left: 4px;
+            }}
+            .kpi-sub {{
+                color: {BRAND_MUTED}; font-size: .78rem; margin-top: 6px;
+            }}
+            .kpi-sub b {{ color: {BRAND_NAVY}; }}
+            .kpi-card.accent {{ border-top: 3px solid {BRAND_RED}; }}
+
+            .section-title {{
+                display:flex; align-items:center; gap:10px;
+                margin: 18px 0 10px;
+            }}
+            .section-title .dot {{
+                width: 6px; height: 22px; background: {BRAND_NAVY};
+                border-radius: 3px;
+            }}
+            .section-title h3 {{ margin: 0 !important; }}
+
+            .chart-card {{
+                background: #FFFFFF;
+                border: 1px solid #E6E9F4;
+                border-radius: 14px;
+                padding: 18px 20px;
+                box-shadow: 0 2px 6px rgba(30,45,120,0.04);
+                margin-bottom: 14px;
+            }}
+
+            div[data-testid="stCaptionContainer"] {{ color: {BRAND_MUTED}; }}
+
+            [data-testid="stSidebar"] {{ background: {BRAND_BG_SOFT}; }}
+            [data-testid="stSidebar"] h2 {{ color: {BRAND_NAVY}; }}
+        </style>
+        """,
+        unsafe_allow_html=True,
+    )
+
+
+def _section_title(text: str) -> None:
+    st.markdown(
+        f'<div class="section-title"><span class="dot"></span><h3>{text}</h3></div>',
+        unsafe_allow_html=True,
+    )
+
+
+def _kpi_card(icon: str, icon_bg: str, icon_color: str, label: str,
+              value: str, unit: str = "", sub: str = "", accent: bool = False) -> str:
+    accent_cls = " accent" if accent else ""
+    unit_html = f'<span class="unit">{unit}</span>' if unit else ""
+    sub_html = f'<div class="kpi-sub">{sub}</div>' if sub else ""
+    return (
+        f'<div class="kpi-card{accent_cls}">'
+        f'<div class="kpi-icon" style="background:{icon_bg};color:{icon_color};">{icon}</div>'
+        f'<div class="kpi-body">'
+        f'<div class="kpi-label">{label}</div>'
+        f'<div class="kpi-value">{value}{unit_html}</div>'
+        f'{sub_html}'
+        f'</div></div>'
+    )
+
+
+def _altair_brand_theme():
+    return {
+        "config": {
+            "background": "#FFFFFF",
+            "view": {"stroke": "transparent"},
+            "axis": {
+                "labelColor": BRAND_TEXT,
+                "titleColor": BRAND_TEXT,
+                "labelFontSize": 11,
+                "titleFontSize": 12,
+                "titleFontWeight": 600,
+                "gridColor": "#E6E9F4",
+                "domainColor": "#D0D5E3",
+                "tickColor": "#D0D5E3",
+            },
+            "legend": {
+                "labelColor": BRAND_TEXT,
+                "titleColor": BRAND_TEXT,
+                "labelFontSize": 11,
+                "titleFontSize": 12,
+                "titleFontWeight": 600,
+            },
+            "title": {
+                "color": BRAND_NAVY,
+                "fontSize": 14,
+                "fontWeight": 700,
+                "anchor": "start",
+            },
+            "range": {"category": BRAND_CATEGORICAL},
+        }
+    }
+
+
+try:
+    alt.theme.register("transoceanica", enable=True)(_altair_brand_theme)
+except AttributeError:
+    alt.themes.register("transoceanica", _altair_brand_theme)
+    alt.themes.enable("transoceanica")
+
+
+AREAS_POR_ADMIN = {
+    "dbuestan": {"IMPORT"},
+    "pmena": {"DOCUMENTAL", "SUPERVISORES"},
+    "gproanio": {"BODEGA"},
+    "fherrera": None,
+    "mpillapa": None,
+}
+
+
+def _get_areas_permitidas(admin_user: str):
+    return AREAS_POR_ADMIN.get(admin_user, set())
+
+
+def _aplicar_scope_admin(df: pd.DataFrame, admin_user: str) -> pd.DataFrame:
+    """Restringe visualización por áreas según el admin autenticado."""
+    permitidas = _get_areas_permitidas(admin_user)
+    if permitidas is None:
+        return df.copy()
+    if df.empty:
+        return df.copy()
+    return df[df["Area"].isin(permitidas)].copy()
 
 def _preparar_df_dashboard(df: pd.DataFrame) -> pd.DataFrame:
     """Convierte columnas a tipos aptos para análisis/gráficos."""
@@ -15,9 +259,13 @@ def _preparar_df_dashboard(df: pd.DataFrame) -> pd.DataFrame:
     d["Timestamp Entrada"] = pd.to_datetime(d["Timestamp Entrada"], errors="coerce")
     d["Timestamp Salida"] = pd.to_datetime(d["Timestamp Salida"], errors="coerce")
     d["Horas Trabajadas"] = pd.to_numeric(d["Horas Trabajadas"], errors="coerce")
+    d["Horas Extra"] = pd.to_numeric(d.get("Horas Extra"), errors="coerce")
+    mask_falta_extra = d["Horas Trabajadas"].notna() & d["Horas Extra"].isna()
+    if mask_falta_extra.any():
+        d.loc[mask_falta_extra, "Horas Extra"] = d.loc[mask_falta_extra, "Horas Trabajadas"].apply(calcular_horas_extra)
     return d
 
-def _sidebar_filtros(df: pd.DataFrame) -> pd.DataFrame:
+def _sidebar_filtros(df: pd.DataFrame, areas_permitidas=None) -> pd.DataFrame:
     """Muestra filtros en la sidebar y devuelve el DataFrame filtrado."""       
     st.sidebar.header("🔍 Filtros")
 
@@ -36,7 +284,17 @@ def _sidebar_filtros(df: pd.DataFrame) -> pd.DataFrame:
         key="filtro_rango",
     )
 
-    areas_sel = st.sidebar.multiselect("Áreas", AREAS, default=AREAS, key="filtro_area")
+    if areas_permitidas is None:
+        areas_disponibles = AREAS
+    else:
+        areas_disponibles = [a for a in AREAS if a in areas_permitidas]
+
+    areas_sel = st.sidebar.multiselect(
+        "Áreas",
+        areas_disponibles,
+        default=areas_disponibles,
+        key="filtro_area",
+    )
 
     empleados_disp = sorted(df["Nombre"].dropna().unique().tolist())
     emp_sel = st.sidebar.multiselect("Empleados", empleados_disp, default=empleados_disp, key="filtro_emp")
@@ -62,45 +320,184 @@ def _render_dashboard(df: pd.DataFrame) -> None:
     completos = df[df["Estado"] == "Completo"]
     abiertos = df[df["Estado"] == "Abierto"]
     total_horas = float(completos["Horas Trabajadas"].sum(skipna=True))
-    horas_extra_df = completos[completos["Horas Trabajadas"] > UMBRAL_HORAS_EXTRA]
-    horas_extra = float(horas_extra_df["Horas Trabajadas"].sum(skipna=True) - UMBRAL_HORAS_EXTRA * len(horas_extra_df))
+    horas_extra = float(completos["Horas Extra"].sum(skipna=True))
+    funcionarios_activos = int(completos["Nombre"].nunique())
+    promedio_turno = total_horas / len(completos) if len(completos) else 0.0
+    pct_extra = (horas_extra / total_horas * 100) if total_horas > 0 else 0.0
 
-    c1, c2, c3, c4 = st.columns(4)
-    c1.metric("Total horas", f"{total_horas:.1f} h")
-    c2.metric("Turnos completos", len(completos))
-    c3.metric("Turnos abiertos", len(abiertos))
-    c4.metric("Horas extra (>9.5h)", f"{max(0, horas_extra):.1f} h")
+    cards_html = (
+        '<div class="kpi-grid">'
+        + _kpi_card(
+            "⏱️", "#E6E9F4", BRAND_NAVY,
+            "Total horas", f"{total_horas:,.1f}", "h",
+            f"Prom. <b>{promedio_turno:.2f}</b> h/turno",
+        )
+        + _kpi_card(
+            "👥", "#E6E9F4", BRAND_NAVY,
+            "Funcionarios", f"{funcionarios_activos}", "",
+            "con al menos un turno completo",
+        )
+        + _kpi_card(
+            "✅", "#E1F3E7", "#1F9254",
+            "Turnos completos", f"{len(completos):,}", "",
+            "con entrada y salida",
+        )
+        + _kpi_card(
+            "🟠", "#FEF3E2", "#C97A0A",
+            "Turnos abiertos", f"{len(abiertos):,}", "",
+            "pendientes de cerrar salida",
+        )
+        + _kpi_card(
+            "🔥", "#FDE7E9", BRAND_RED,
+            f"Horas extra (>{HORAS_BASE_TURNO:.0f}h)",
+            f"{max(0, horas_extra):,.1f}", "h",
+            f"<b>{pct_extra:.1f}%</b> del total" if total_horas > 0 else "",
+            accent=True,
+        )
+        + "</div>"
+    )
+    st.markdown(cards_html, unsafe_allow_html=True)
 
-    st.divider()
+    st.markdown("<div style='height:8px;'></div>", unsafe_allow_html=True)
 
-    st.subheader("Horas por área")
-    if not completos.empty:
-        por_area = completos.groupby("Area", dropna=True)["Horas Trabajadas"].sum().reset_index()
-        por_area = por_area.sort_values("Horas Trabajadas", ascending=False)    
-        st.bar_chart(por_area, x="Area", y="Horas Trabajadas", use_container_width=True)
-    else:
+    if completos.empty:
         st.caption("Sin turnos completos en el filtro.")
+        return
 
-    st.subheader("Top 10 empleados por horas")
-    if not completos.empty:
-        por_emp = completos.groupby("Nombre", dropna=True)["Horas Trabajadas"].sum().reset_index()
-        por_emp = por_emp.sort_values("Horas Trabajadas", ascending=False).head(10)
-        st.bar_chart(por_emp, x="Nombre", y="Horas Trabajadas", use_container_width=True)
-    else:
-        st.caption("Sin datos.")
+    _section_title("📈 Tendencia diaria por funcionario")
+    st.caption("Se muestran los funcionarios con más horas en el período filtrado para facilitar la lectura.")
 
-    st.subheader("Horas trabajadas por día")
-    if not completos.empty:
-        por_dia = completos.groupby("Fecha de Turno", dropna=True)["Horas Trabajadas"].sum().reset_index()
-        por_dia = por_dia.sort_values("Fecha de Turno")
-        st.line_chart(por_dia, x="Fecha de Turno", y="Horas Trabajadas", use_container_width=True)
-    else:
-        st.caption("Sin datos.")
+    top_n = st.slider("Funcionarios en el gráfico", min_value=3, max_value=20, value=8, step=1, key="top_n_func")
+
+    total_por_func = (
+        completos.groupby("Nombre", dropna=True)["Horas Trabajadas"]
+        .sum()
+        .sort_values(ascending=False)
+    )
+    top_funcionarios = total_por_func.head(top_n).index.tolist()
+
+    lineas_df = (
+        completos[completos["Nombre"].isin(top_funcionarios)]
+        .groupby(["Fecha de Turno", "Nombre"], dropna=True)["Horas Trabajadas"]
+        .sum()
+        .reset_index()
+        .sort_values(["Fecha de Turno", "Nombre"])
+    )
+
+    chart_lineas = (
+        alt.Chart(lineas_df)
+        .mark_line(
+            point=alt.OverlayMarkDef(size=55, filled=True, stroke="white", strokeWidth=1),
+            strokeWidth=2.5,
+            interpolate="monotone",
+        )
+        .encode(
+            x=alt.X("Fecha de Turno:T", title="Fecha", axis=alt.Axis(format="%d %b", labelAngle=0)),
+            y=alt.Y("Horas Trabajadas:Q", title="Horas trabajadas"),
+            color=alt.Color(
+                "Nombre:N",
+                title="Funcionario",
+                scale=alt.Scale(range=BRAND_CATEGORICAL),
+                legend=alt.Legend(orient="bottom", columns=4, symbolType="circle"),
+            ),
+            tooltip=[
+                alt.Tooltip("Fecha de Turno:T", title="Fecha", format="%d %b %Y"),
+                alt.Tooltip("Nombre:N", title="Funcionario"),
+                alt.Tooltip("Horas Trabajadas:Q", title="Horas", format=".2f"),
+            ],
+        )
+        .properties(height=360)
+    )
+    st.altair_chart(chart_lineas, use_container_width=True)
+
+    c_left, c_right = st.columns(2, gap="large")
+
+    with c_left:
+        _section_title("📊 Horas y horas extra por funcionario")
+        agg_emp = (
+            completos.groupby("Nombre", dropna=True)[["Horas Trabajadas", "Horas Extra"]]
+            .sum()
+            .reset_index()
+            .sort_values("Horas Trabajadas", ascending=False)
+            .head(12)
+        )
+
+        barras = agg_emp.melt(
+            id_vars=["Nombre"],
+            value_vars=["Horas Trabajadas", "Horas Extra"],
+            var_name="Indicador",
+            value_name="Horas",
+        )
+        orden_nombres = agg_emp["Nombre"].tolist()
+        chart_barras = (
+            alt.Chart(barras)
+            .mark_bar(cornerRadiusTopLeft=4, cornerRadiusTopRight=4)
+            .encode(
+                x=alt.X(
+                    "Nombre:N",
+                    sort=orden_nombres,
+                    title="Funcionario",
+                    axis=alt.Axis(labelAngle=-35, labelLimit=120),
+                ),
+                y=alt.Y("Horas:Q", title="Horas"),
+                color=alt.Color(
+                    "Indicador:N",
+                    title=None,
+                    scale=alt.Scale(
+                        domain=["Horas Trabajadas", "Horas Extra"],
+                        range=[BRAND_NAVY, BRAND_RED],
+                    ),
+                    legend=alt.Legend(orient="top", symbolType="square"),
+                ),
+                xOffset=alt.XOffset("Indicador:N"),
+                tooltip=[
+                    alt.Tooltip("Nombre:N", title="Funcionario"),
+                    alt.Tooltip("Indicador:N", title="Indicador"),
+                    alt.Tooltip("Horas:Q", title="Horas", format=".2f"),
+                ],
+            )
+            .properties(height=340)
+        )
+        st.altair_chart(chart_barras, use_container_width=True)
+
+    with c_right:
+        _section_title("🗂️ Distribución de horas por área")
+        por_area_dia = (
+            completos.groupby(["Fecha de Turno", "Area"], dropna=True)["Horas Trabajadas"]
+            .sum()
+            .reset_index()
+            .sort_values("Fecha de Turno")
+        )
+        chart_area = (
+            alt.Chart(por_area_dia)
+            .mark_area(opacity=0.78, interpolate="monotone", line={"strokeWidth": 1.5})
+            .encode(
+                x=alt.X("Fecha de Turno:T", title="Fecha", axis=alt.Axis(format="%d %b", labelAngle=0)),
+                y=alt.Y("Horas Trabajadas:Q", stack="zero", title="Horas"),
+                color=alt.Color(
+                    "Area:N",
+                    title="Área",
+                    scale=alt.Scale(range=BRAND_CATEGORICAL),
+                    legend=alt.Legend(orient="bottom", symbolType="square"),
+                ),
+                tooltip=[
+                    alt.Tooltip("Fecha de Turno:T", title="Fecha", format="%d %b %Y"),
+                    alt.Tooltip("Area:N", title="Área"),
+                    alt.Tooltip("Horas Trabajadas:Q", title="Horas", format=".2f"),
+                ],
+            )
+            .properties(height=340)
+        )
+        st.altair_chart(chart_area, use_container_width=True)
 
 def _render_tabla(df: pd.DataFrame) -> None:
     if df.empty:
         st.info("Sin registros en el rango filtrado.")
         return
+
+    if "Horas Extra" in df.columns:
+        df = df.copy()
+        df["Horas Extra"] = pd.to_numeric(df["Horas Extra"], errors="coerce").fillna(0).round(2)
 
     st.caption(f"Mostrando **{len(df)}** registros.")
     st.dataframe(df, use_container_width=True, hide_index=True)
@@ -114,16 +511,25 @@ def _render_tabla(df: pd.DataFrame) -> None:
         use_container_width=True,
     )
 
-def _render_correcciones() -> None:
+def _render_correcciones(areas_permitidas=None) -> None:
     """Flujo para cerrar turnos abiertos o crear registros históricos. Solo super admin."""
     st.caption(
         "Úsalo cuando un empleado olvidó marcar entrada, salida o ambas. "    
         "Toda corrección queda registrada en 'Observaciones' con el prefijo 'Registro manual:' para auditoría."
     )
 
+    if areas_permitidas is None:
+        areas_corr = AREAS
+    else:
+        areas_corr = [a for a in AREAS if a in areas_permitidas]
+
+    if not areas_corr:
+        st.warning("No tienes áreas habilitadas para realizar correcciones.")
+        return
+
     ca_corr, ce_corr = st.columns(2)
     with ca_corr:
-        area_corr = st.selectbox("Área", AREAS, key="area_corr")
+        area_corr = st.selectbox("Área", areas_corr, key="area_corr")
     with ce_corr:
         lista_empleados = EMPLEADOS_POR_AREA.get(area_corr, []) if area_corr else []
         emp_corr = st.selectbox("Empleado a corregir", lista_empleados, key="emp_corr")
@@ -239,6 +645,7 @@ def _render_correcciones() -> None:
                         "Timestamp Entrada": ts_in.strftime(TS_FMT),
                         "Timestamp Salida": ts_out.strftime(TS_FMT),
                         "Horas Trabajadas": horas,
+                        "Horas Extra": calcular_horas_extra(horas),
                         "Estado": "Completo",
                         "Observaciones": f"Registro manual: {det}",
                     }])
@@ -249,22 +656,46 @@ def _render_correcciones() -> None:
 def vista_super_admin() -> None:
     usuario = st.session_state["usuario"]
     admin_rol = st.session_state.get("admin_rol", "")
+    admin_user = st.session_state.get("admin_user", "")
+    areas_permitidas = _get_areas_permitidas(admin_user)
+
+    _inject_brand_css()
 
     st.title("⏱️ Marcador de Horas — Panel Administrativo")
 
-    ch1, ch2 = st.columns([3, 1])
+    ch1, ch2 = st.columns([5, 1])
     with ch1:
-        st.markdown(f"### 👔 {usuario}  \n💼 **{admin_rol}**")
+        st.markdown(
+            f"""
+            <div class="brand-header">
+                <div class="user-block">
+                    <div class="avatar">👔</div>
+                    <div>
+                        <div class="uname">{usuario}</div>
+                        <span class="role">💼 {admin_rol}</span>
+                    </div>
+                </div>
+            </div>
+            """,
+            unsafe_allow_html=True,
+        )
     with ch2:
-        if st.button("Cerrar sesión", use_container_width=True):
+        st.write("")
+        if st.button("🚪 Cerrar sesión", use_container_width=True):
             logout()
             st.rerun()
 
-    st.divider()
+    st.markdown("<div style='height:14px;'></div>", unsafe_allow_html=True)
 
     df_raw = leer_registros()
-    df_dash = _preparar_df_dashboard(df_raw)
-    df_filt = _sidebar_filtros(df_dash)
+    df_scope = _aplicar_scope_admin(df_raw, admin_user)
+    df_dash = _preparar_df_dashboard(df_scope)
+    df_filt = _sidebar_filtros(df_dash, areas_permitidas=areas_permitidas)
+
+    if areas_permitidas is None:
+        st.caption("🔓 Acceso total a todas las áreas.")
+    else:
+        st.caption(f"🔐 Áreas habilitadas para este usuario: {', '.join(sorted(areas_permitidas))}")
 
     tab_dash, tab_tabla, tab_corr = st.tabs(["📊 Dashboard", "📋 Tabla", "🛠️ Correcciones"])
     with tab_dash:
@@ -272,4 +703,4 @@ def vista_super_admin() -> None:
     with tab_tabla:
         _render_tabla(df_filt)
     with tab_corr:
-        _render_correcciones()
+        _render_correcciones(areas_permitidas=areas_permitidas)

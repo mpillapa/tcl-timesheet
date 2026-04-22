@@ -38,6 +38,7 @@ def logout() -> None:
         "auth_ok", "gate_passed", "gate_via", "rol",
         "usuario", "area", "admin_user", "admin_rol",
         "salida_pendiente",
+        "auto_logout_started_at",
     ):
         st.session_state.pop(k, None)
 

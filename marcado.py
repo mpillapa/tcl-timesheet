@@ -1,6 +1,7 @@
 """Lógica de negocio: marcar entrada/salida, justificación de horas extra."""
 
 from datetime import datetime
+import time
 
 import pandas as pd
 import streamlit as st
@@ -10,16 +11,26 @@ from data import (
     leer_registros,
     escribir_registros,
     calcular_horas,
+    calcular_horas_extra,
     buscar_turno_abierto_idx,
 )
 from employees import AREA_DE
 from time_utils import now_ecuador
 
 
+AUTO_LOGOUT_SECONDS = 5
+
+
+def programar_cierre_sesion() -> None:
+    """Activa cierre automático de sesión tras una marcación exitosa."""
+    st.session_state["auto_logout_started_at"] = time.time()
+
+
 def guardar_salida(df, idx, ts_salida, horas, observacion):
     """Actualiza una fila con los datos de salida. Usado por marcado y correcciones."""
     df.loc[idx, "Timestamp Salida"] = ts_salida.strftime(TS_FMT)
     df.loc[idx, "Horas Trabajadas"] = horas
+    df.loc[idx, "Horas Extra"] = calcular_horas_extra(horas)
     df.loc[idx, "Estado"] = "Completo"
     df.loc[idx, "Observaciones"] = observacion
     escribir_registros(df)
@@ -53,11 +64,13 @@ def marcar_entrada(nombre: str) -> None:
         "Timestamp Entrada": ahora.strftime(TS_FMT),
         "Timestamp Salida": "",
         "Horas Trabajadas": "",
+        "Horas Extra": "",
         "Estado": "Abierto",
         "Observaciones": "",
     }])
     escribir_registros(pd.concat([df, nueva], ignore_index=True))
     st.success(f"✅ Entrada registrada para **{nombre}** a las {ahora.strftime('%H:%M:%S')}")
+    programar_cierre_sesion()
 
 
 def marcar_salida(nombre: str) -> None:
@@ -91,6 +104,7 @@ def marcar_salida(nombre: str) -> None:
         f"Entrada: {ts_entrada.strftime('%Y-%m-%d %H:%M')} → "
         f"Salida: {ahora.strftime('%Y-%m-%d %H:%M')} = **{horas} h**"
     )
+    programar_cierre_sesion()
 
 
 def render_formulario_justificacion() -> None:
@@ -143,4 +157,5 @@ def render_formulario_justificacion() -> None:
 
         del st.session_state["salida_pendiente"]
         st.success(f"✅ Salida registrada con justificación. Horas: **{pend['horas']}**")
+        programar_cierre_sesion()
         st.rerun()
