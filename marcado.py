@@ -9,7 +9,8 @@ import streamlit as st
 from config import TS_FMT, UMBRAL_OLVIDO_H, UMBRAL_HORAS_EXTRA, MIN_JUSTIF_CHARS
 from data import (
     leer_registros,
-    escribir_registros,
+    append_registro,
+    actualizar_por_entrada,
     calcular_horas,
     calcular_horas_extra,
     buscar_turno_abierto_idx,
@@ -26,14 +27,17 @@ def programar_cierre_sesion() -> None:
     st.session_state["auto_logout_started_at"] = time.time()
 
 
-def guardar_salida(df, idx, ts_salida, horas, observacion):
-    """Actualiza una fila con los datos de salida. Usado por marcado y correcciones."""
-    df.loc[idx, "Timestamp Salida"] = ts_salida.strftime(TS_FMT)
-    df.loc[idx, "Horas Trabajadas"] = horas
-    df.loc[idx, "Horas Extra"] = calcular_horas_extra(horas)
-    df.loc[idx, "Estado"] = "Completo"
-    df.loc[idx, "Observaciones"] = observacion
-    escribir_registros(df)
+def guardar_salida(nombre: str, ts_entrada_str: str, ts_salida, horas, observacion) -> bool:
+    """Cierra un turno localizándolo por (Nombre, Timestamp Entrada) sobre una
+    lectura fresca. Devuelve False si la fila ya no existe."""
+    cambios = {
+        "Timestamp Salida": ts_salida.strftime(TS_FMT),
+        "Horas Trabajadas": horas,
+        "Horas Extra": calcular_horas_extra(horas),
+        "Estado": "Completo",
+        "Observaciones": observacion,
+    }
+    return actualizar_por_entrada(nombre, ts_entrada_str, cambios)
 
 
 def marcar_entrada(nombre: str) -> None:
@@ -57,7 +61,7 @@ def marcar_entrada(nombre: str) -> None:
         return
 
     ahora = now_ecuador()
-    nueva = pd.DataFrame([{
+    append_registro({
         "Nombre": nombre,
         "Area": AREA_DE.get(nombre, ""),
         "Fecha de Turno": ahora.strftime("%Y-%m-%d"),
@@ -67,8 +71,7 @@ def marcar_entrada(nombre: str) -> None:
         "Horas Extra": "",
         "Estado": "Abierto",
         "Observaciones": "",
-    }])
-    escribir_registros(pd.concat([df, nueva], ignore_index=True))
+    })
     st.success(f"✅ Entrada registrada para **{nombre}** a las {ahora.strftime('%H:%M:%S')}")
     programar_cierre_sesion()
 
@@ -85,20 +88,23 @@ def marcar_salida(nombre: str) -> None:
         return
 
     ahora = now_ecuador()
-    ts_entrada = datetime.strptime(str(df.loc[idx, "Timestamp Entrada"]), TS_FMT)
+    ts_entrada_str = str(df.loc[idx, "Timestamp Entrada"])
+    ts_entrada = datetime.strptime(ts_entrada_str, TS_FMT)
     horas = calcular_horas(ts_entrada, ahora)
 
     # Si excede el umbral, diferir guardado y pedir justificación en otro render.
     if horas > UMBRAL_HORAS_EXTRA:
         st.session_state["salida_pendiente"] = {
             "nombre": nombre,
-            "ts_entrada_str": df.loc[idx, "Timestamp Entrada"],
+            "ts_entrada_str": ts_entrada_str,
             "ts_salida_str": ahora.strftime(TS_FMT),
             "horas": horas,
         }
         return
 
-    guardar_salida(df, idx, ahora, horas, "")
+    if not guardar_salida(nombre, ts_entrada_str, ahora, horas, ""):
+        st.error("El turno ya no existe (pudo haber sido modificado por un administrador). Refresca la página.")
+        return
     st.success(
         f"✅ Salida registrada para **{nombre}**. "
         f"Entrada: {ts_entrada.strftime('%Y-%m-%d %H:%M')} → "
@@ -143,17 +149,11 @@ def render_formulario_justificacion() -> None:
             )
             return
 
-        df = leer_registros()
-        mask = (df["Nombre"] == pend["nombre"]) & (df["Timestamp Entrada"] == pend["ts_entrada_str"])
-        idxs = df.index[mask].tolist()
-        if not idxs:
-            st.error("No se encontró el turno a cerrar. Recarga la página.")
-            return
-
-        idx = idxs[0]
         ts_salida = datetime.strptime(pend["ts_salida_str"], TS_FMT)
         obs = f"Horas extra justificadas: {justif.strip()}"
-        guardar_salida(df, idx, ts_salida, pend["horas"], obs)
+        if not guardar_salida(pend["nombre"], pend["ts_entrada_str"], ts_salida, pend["horas"], obs):
+            st.error("No se encontró el turno a cerrar. Recarga la página.")
+            return
 
         del st.session_state["salida_pendiente"]
         st.success(f"✅ Salida registrada con justificación. Horas: **{pend['horas']}**")

@@ -5,7 +5,7 @@ from datetime import datetime, date, time
 from auth import logout
 from data import (
     leer_registros,
-    escribir_registros,
+    append_registro,
     calcular_horas,
     calcular_horas_extra,
     buscar_turno_abierto_idx,
@@ -592,9 +592,12 @@ def _render_correcciones(areas_permitidas=None) -> None:
                             f"El detalle debe tener al menos {MIN_JUSTIF_CHARS} caracteres."
                         )
                     else:
-                        guardar_salida(df_actual, idx_obj, ts_sal, horas, f"Registro manual: {det}")
-                        st.success(f"✅ Turno cerrado. Horas trabajadas: {horas}")
-                        st.rerun()
+                        ts_entrada_str = str(df_actual.loc[idx_obj, "Timestamp Entrada"])
+                        if not guardar_salida(emp_corr, ts_entrada_str, ts_sal, horas, f"Registro manual: {det}"):
+                            st.error("El turno ya no existe (puede haber sido modificado). Recarga la página.")
+                        else:
+                            st.success(f"✅ Turno cerrado. Horas trabajadas: {horas}")
+                            st.rerun()
     else:
         st.caption("Ambas marcas se ingresan manualmente. Úsalo solo para turnos ya pasados.")
         c1, c2 = st.columns(2)
@@ -638,7 +641,7 @@ def _render_correcciones(areas_permitidas=None) -> None:
                         f"El detalle debe tener al menos {MIN_JUSTIF_CHARS} caracteres."
                     )
                 else:
-                    nueva = pd.DataFrame([{
+                    append_registro({
                         "Nombre": emp_corr,
                         "Area": AREA_DE.get(emp_corr, ""),
                         "Fecha de Turno": ts_in.strftime("%Y-%m-%d"),
@@ -648,8 +651,7 @@ def _render_correcciones(areas_permitidas=None) -> None:
                         "Horas Extra": calcular_horas_extra(horas),
                         "Estado": "Completo",
                         "Observaciones": f"Registro manual: {det}",
-                    }])
-                    escribir_registros(pd.concat([df_actual, nueva], ignore_index=True))
+                    })
                     st.success(f"✅ Registro creado. Horas trabajadas: {horas}")
                     st.rerun()
 
