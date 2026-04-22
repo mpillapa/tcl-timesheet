@@ -7,12 +7,22 @@ try:
 except Exception:
     ZoneInfo = None
 
+ECUADOR_OFFSET = timezone(timedelta(hours=-5))
+
+
+def _ecuador_tz():
+    """Devuelve el tzinfo de Ecuador. Prefiere ZoneInfo; cae a offset fijo -5 si falla."""
+    if ZoneInfo is not None:
+        try:
+            return ZoneInfo("America/Guayaquil")
+        except Exception:
+            pass
+    return ECUADOR_OFFSET
+
 
 def now_ecuador() -> datetime:
-    """Devuelve la fecha/hora actual de Ecuador como datetime naive local."""
-    if ZoneInfo is not None:
-        return datetime.now(timezone.utc).astimezone(ZoneInfo("America/Guayaquil")).replace(tzinfo=None)
-    return datetime.now(timezone.utc).astimezone(timezone(timedelta(hours=-5))).replace(tzinfo=None)
+    """Devuelve la fecha/hora actual de Ecuador como datetime naive local (UTC-5)."""
+    return datetime.now(timezone.utc).astimezone(_ecuador_tz()).replace(tzinfo=None)
 
 
 def today_ecuador() -> date:
