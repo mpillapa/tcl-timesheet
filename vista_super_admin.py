@@ -275,7 +275,13 @@ def _preparar_df_dashboard(df: pd.DataFrame) -> pd.DataFrame:
     d["Timestamp Salida"] = _parse_dt_series(d["Timestamp Salida"])
 
     d["Estado"] = d["Estado"].fillna("").astype(str).str.strip().str.casefold()
-    d["Estado"] = d["Estado"].replace({"completo": "Completo", "abierto": "Abierto"})
+    d["Estado"] = d["Estado"].replace(
+        {
+            "completo": "Completo",
+            "abierto": "Abierto",
+            "revision": "Revision",
+        }
+    )
 
     d["Horas Trabajadas"] = _parse_num_series(d["Horas Trabajadas"])
     d["Horas Extra"] = _parse_num_series(d.get("Horas Extra", pd.Series(index=d.index, dtype=object)))
@@ -318,7 +324,7 @@ def _sidebar_filtros(df: pd.DataFrame, areas_permitidas=None) -> pd.DataFrame:
     empleados_disp = sorted(df["Nombre"].dropna().unique().tolist())
     emp_sel = st.sidebar.multiselect("Empleados", empleados_disp, default=empleados_disp, key="filtro_emp")
 
-    estados = ["Completo", "Abierto"]
+    estados = ["Completo", "Abierto", "Revision"]
     est_sel = st.sidebar.multiselect("Estado", estados, default=estados, key="filtro_est")
 
     mask = pd.Series(True, index=df.index)
@@ -338,6 +344,7 @@ def _render_dashboard(df: pd.DataFrame) -> None:
 
     completos = df[df["Estado"] == "Completo"]
     abiertos = df[df["Estado"] == "Abierto"]
+    revision = df[df["Estado"] == "Revision"]
     total_horas = float(completos["Horas Trabajadas"].sum(skipna=True))
     horas_extra = float(completos["Horas Extra"].sum(skipna=True))
     funcionarios_activos = int(completos["Nombre"].nunique())
@@ -365,6 +372,11 @@ def _render_dashboard(df: pd.DataFrame) -> None:
             "🟠", "#FEF3E2", "#C97A0A",
             "Turnos abiertos", f"{len(abiertos):,}", "",
             "pendientes de cerrar salida",
+        )
+        + _kpi_card(
+            "📝", "#FDE7E9", BRAND_RED,
+            "En revisión", f"{len(revision):,}", "",
+            "turnos >18h enviados a super admin",
         )
         + _kpi_card(
             "🔥", "#FDE7E9", BRAND_RED,
@@ -570,7 +582,7 @@ def _render_correcciones(areas_permitidas=None) -> None:
         _nombre = df_actual["Nombre"].fillna("").astype(str).str.strip()
         _estado = df_actual["Estado"].fillna("").astype(str).str.strip()
         _obs = df_actual["Observaciones"].fillna("").astype(str).str.strip()
-        mask_primary = (_nombre == emp_norm) & (_estado == "Abierto")
+        mask_primary = (_nombre == emp_norm) & (_estado.isin(["Abierto", "Revision"]))
         mask_legacy = (_nombre == emp_norm) & (_obs == "Abierto") & (_estado == "")
         df_abiertos = df_actual[mask_primary | mask_legacy]
         if df_abiertos.empty:

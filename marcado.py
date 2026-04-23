@@ -20,6 +20,21 @@ from time_utils import now_ecuador
 
 
 AUTO_LOGOUT_SECONDS = 5
+ESTADO_REVISION = "Revision"
+
+
+def _crear_nueva_entrada(nombre: str, ahora: datetime) -> None:
+    append_registro({
+        "Nombre": nombre,
+        "Area": AREA_DE.get(nombre, ""),
+        "Fecha de Turno": ahora.strftime("%Y-%m-%d"),
+        "Timestamp Entrada": ahora.strftime(TS_FMT),
+        "Timestamp Salida": "",
+        "Horas Trabajadas": "",
+        "Horas Extra": "",
+        "Estado": "Abierto",
+        "Observaciones": "",
+    })
 
 
 def _parse_timestamp_flexible(raw_ts: str) -> datetime | None:
@@ -53,19 +68,48 @@ def guardar_salida(nombre: str, ts_entrada_str: str, ts_salida, horas, observaci
 def marcar_entrada(nombre: str) -> None:
     df = leer_registros()
     idx_abierto = buscar_turno_abierto_idx(df, nombre)
+    ahora = now_ecuador()
 
     if idx_abierto is not None:
-        ts_prev = _parse_timestamp_flexible(str(df.loc[idx_abierto, "Timestamp Entrada"]))
+        ts_prev_str = str(df.loc[idx_abierto, "Timestamp Entrada"])
+        ts_prev = _parse_timestamp_flexible(ts_prev_str)
         if ts_prev is None:
             st.error("No se pudo interpretar la hora de entrada del turno abierto. Contacta a tu supervisor.")
             return
         horas_abiertas = (now_ecuador() - ts_prev).total_seconds() / 3600
         if horas_abiertas > UMBRAL_OLVIDO_H:
-            st.error(
-                f"⚠️ Parece que **{nombre}** olvidó marcar salida del turno iniciado el "
-                f"{ts_prev.strftime('%Y-%m-%d %H:%M')} "
-                f"({horas_abiertas:.1f} h abiertas). Contacta a tu supervisor para cerrarlo."
+            obs_prev = str(df.loc[idx_abierto, "Observaciones"] or "").strip()
+            if obs_prev.lower() == "nan":
+                obs_prev = ""
+            tag_revision = (
+                f"Pendiente revision supervisor: turno > {UMBRAL_OLVIDO_H} h "
+                f"sin salida (inicio {ts_prev.strftime('%Y-%m-%d %H:%M')})."
             )
+            obs_nueva = f"{obs_prev} | {tag_revision}" if obs_prev else tag_revision
+
+            actualizado = actualizar_por_entrada(
+                nombre,
+                ts_prev_str,
+                {
+                    "Estado": ESTADO_REVISION,
+                    "Observaciones": obs_nueva,
+                },
+            )
+
+            if not actualizado:
+                st.error(
+                    "Se detectó un turno abierto mayor a 18h, pero no se pudo enviarlo a revisión. "
+                    "Recarga la página e intenta nuevamente."
+                )
+                return
+
+            _crear_nueva_entrada(nombre, ahora)
+            st.warning(
+                f"⚠️ El turno anterior de **{nombre}** ("
+                f"{horas_abiertas:.1f} h abiertas) fue enviado a revisión de super admin. "
+                f"Se registró una nueva entrada a las {ahora.strftime('%H:%M:%S')}."
+            )
+            programar_cierre_sesion()
         else:
             st.warning(
                 f"⚠️ {nombre} ya tiene un turno abierto desde "
@@ -73,18 +117,7 @@ def marcar_entrada(nombre: str) -> None:
             )
         return
 
-    ahora = now_ecuador()
-    append_registro({
-        "Nombre": nombre,
-        "Area": AREA_DE.get(nombre, ""),
-        "Fecha de Turno": ahora.strftime("%Y-%m-%d"),
-        "Timestamp Entrada": ahora.strftime(TS_FMT),
-        "Timestamp Salida": "",
-        "Horas Trabajadas": "",
-        "Horas Extra": "",
-        "Estado": "Abierto",
-        "Observaciones": "",
-    })
+    _crear_nueva_entrada(nombre, ahora)
     st.success(f"✅ Entrada registrada para **{nombre}** a las {ahora.strftime('%H:%M:%S')}")
     programar_cierre_sesion()
 
