@@ -34,4 +34,4 @@ UMBRAL_OLVIDO_H = 18
 
 # Horas por encima de este valor requieren justificación obligatoria.
 UMBRAL_HORAS_EXTRA = HORAS_BASE_TURNO
-MIN_JUSTIF_CHARS = 20
+MIN_JUSTIF_CHARS = 10

@@ -1,8 +1,8 @@
 import streamlit as st
 import time
 
-from auth import logout
-from marcado import (
+from core.auth import logout
+from core.marcado import (
     AUTO_LOGOUT_SECONDS,
     marcar_entrada,
     marcar_salida,

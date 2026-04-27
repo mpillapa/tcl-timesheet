@@ -6,8 +6,8 @@ import time
 import pandas as pd
 import streamlit as st
 
-from config import TS_FMT, UMBRAL_OLVIDO_H, UMBRAL_HORAS_EXTRA, MIN_JUSTIF_CHARS
-from data import (
+from core.config import TS_FMT, UMBRAL_OLVIDO_H, UMBRAL_HORAS_EXTRA, MIN_JUSTIF_CHARS
+from core.data import (
     leer_registros,
     append_registro,
     actualizar_por_entrada,
@@ -15,12 +15,19 @@ from data import (
     calcular_horas_extra,
     buscar_turno_abierto_idx,
 )
-from employees import AREA_DE
-from time_utils import now_ecuador
+from core.employees import AREA_DE
+from core.time_utils import now_ecuador
 
 
 AUTO_LOGOUT_SECONDS = 5
 ESTADO_REVISION = "Revision"
+
+
+def _fmt_duracion(horas: float) -> str:
+    """Convierte horas decimales a 'Xh Ym' para mostrar al usuario."""
+    total_min = round(horas * 60)
+    h, m = divmod(total_min, 60)
+    return f"{h}h {m:02d}min"
 
 
 def _crear_nueva_entrada(nombre: str, ahora: datetime) -> None:
@@ -156,8 +163,9 @@ def marcar_salida(nombre: str) -> None:
         return
     st.success(
         f"✅ Salida registrada para **{nombre}**. "
-        f"Entrada: {ts_entrada.strftime('%Y-%m-%d %H:%M')} → "
-        f"Salida: {ahora.strftime('%Y-%m-%d %H:%M')} = **{horas} h**"
+        f"Entrada: {ts_entrada.strftime('%H:%M')} → "
+        f"Salida: {ahora.strftime('%H:%M')} — "
+        f"**{_fmt_duracion(horas)} trabajadas**"
     )
     programar_cierre_sesion()
 
@@ -169,8 +177,8 @@ def render_formulario_justificacion() -> None:
 
     pend = st.session_state["salida_pendiente"]
     st.warning(
-        f"⏱️ **{pend['nombre']}** trabajó **{pend['horas']} h** "
-        f"(excede {UMBRAL_HORAS_EXTRA} h). "
+        f"⏱️ **{pend['nombre']}** trabajó **{_fmt_duracion(pend['horas'])}** "
+        f"(excede el límite de {UMBRAL_HORAS_EXTRA} h). "
         "Debes ingresar una justificación válida para guardar la salida."
     )
     justif = st.text_area(
@@ -205,6 +213,6 @@ def render_formulario_justificacion() -> None:
             return
 
         del st.session_state["salida_pendiente"]
-        st.success(f"✅ Salida registrada con justificación. Horas: **{pend['horas']}**")
+        st.success(f"✅ Salida registrada con justificación. Tiempo trabajado: **{_fmt_duracion(pend['horas'])}**")
         programar_cierre_sesion()
         st.rerun()

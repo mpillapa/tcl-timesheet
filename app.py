@@ -1,4 +1,4 @@
-﻿"""
+"""
 Marcador de Entrada y Salida - Horas Extra
 ==========================================
 App Streamlit con persistencia en Google Sheets via st.connection.
@@ -11,9 +11,9 @@ import streamlit as st
 
 st.set_page_config(page_title="Marcador de Horas", page_icon="⏱️", layout="centered")
 
-from auth import check_access
-from vista_colaborador import vista_colaborador
-from vista_super_admin import vista_super_admin
+from core.auth import check_access
+from views.colaborador import vista_colaborador
+from views.super_admin import vista_super_admin
 
 def main():
     check_access()

@@ -2,18 +2,18 @@ import streamlit as st
 import pandas as pd
 import altair as alt
 from datetime import datetime, date, time
-from auth import logout
-from data import (
+from core.auth import logout
+from core.data import (
     leer_registros,
     append_registro,
     calcular_horas,
     calcular_horas_extra,
     buscar_turno_abierto_idx,
 )
-from employees import AREAS, EMPLEADOS_POR_AREA, AREA_DE
-from config import UMBRAL_HORAS_EXTRA, TS_FMT, MIN_JUSTIF_CHARS, HORAS_BASE_TURNO
-from marcado import guardar_salida
-from time_utils import now_ecuador, today_ecuador
+from core.employees import AREAS, EMPLEADOS_POR_AREA, AREA_DE
+from core.config import UMBRAL_HORAS_EXTRA, TS_FMT, MIN_JUSTIF_CHARS, HORAS_BASE_TURNO
+from core.marcado import guardar_salida
+from core.time_utils import now_ecuador, today_ecuador
 
 
 BRAND_NAVY = "#1E2D78"
@@ -161,6 +161,46 @@ def _inject_brand_css() -> None:
 
             [data-testid="stSidebar"] {{ background: {BRAND_BG_SOFT}; }}
             [data-testid="stSidebar"] h2 {{ color: {BRAND_NAVY}; }}
+
+            /* ── Filter chips ── */
+            .filter-bar {{
+                display: flex;
+                flex-wrap: wrap;
+                align-items: center;
+                gap: 6px;
+                padding: 8px 0 6px;
+            }}
+            .fchip {{
+                display: inline-flex;
+                align-items: center;
+                gap: 5px;
+                padding: 4px 12px;
+                border-radius: 999px;
+                font-size: 0.78rem;
+                font-weight: 600;
+                border: 1px solid transparent;
+                white-space: nowrap;
+                letter-spacing: 0.01em;
+            }}
+            .fchip-date  {{ background:#EBF0FF; color:{BRAND_NAVY};  border-color:#C5CBDF; }}
+            .fchip-area  {{ background:{BRAND_NAVY}; color:#FFFFFF;   border-color:{BRAND_NAVY}; }}
+            .fchip-emp   {{ background:#E8F4F8; color:#0D6E8A;        border-color:#A0CEDE; }}
+            .fchip-est   {{ background:#FEF3E2; color:#C97A0A;        border-color:#F5CC7A; }}
+            .fchip-none  {{ background:#F4F6FC; color:{BRAND_MUTED};  border-color:#E6E9F4; font-weight:400; font-style:italic; }}
+
+            /* Estilo mejorado del popover */
+            [data-testid="stPopover"] > button {{
+                background: {BRAND_NAVY} !important;
+                color: #FFFFFF !important;
+                border: none !important;
+                border-radius: 8px !important;
+                font-weight: 600 !important;
+            }}
+            [data-testid="stPopover"] > button:hover {{
+                background: {BRAND_NAVY_MID} !important;
+                color: #FFFFFF !important;
+            }}
+
         </style>
         """,
         unsafe_allow_html=True,
@@ -290,52 +330,126 @@ def _preparar_df_dashboard(df: pd.DataFrame) -> pd.DataFrame:
         d.loc[mask_falta_extra, "Horas Extra"] = d.loc[mask_falta_extra, "Horas Trabajadas"].apply(calcular_horas_extra)
     return d
 
-def _sidebar_filtros(df: pd.DataFrame, areas_permitidas=None) -> pd.DataFrame:
-    """Muestra filtros en la sidebar y devuelve el DataFrame filtrado."""       
-    st.sidebar.header("🔍 Filtros")
+def _build_filter_chips_html(
+    rango, fmin, fmax,
+    areas_sel, areas_disponibles,
+    emp_sel, empleados_disp,
+    est_sel, estados,
+    total: int, filtrados: int,
+) -> str:
+    chips = []
 
+    if isinstance(rango, tuple) and len(rango) == 2 and (rango[0] != fmin or rango[1] != fmax):
+        chips.append(
+            f'<span class="fchip fchip-date">📅 {rango[0].strftime("%d/%m/%y")} – {rango[1].strftime("%d/%m/%y")}</span>'
+        )
+    if bool(areas_sel) and set(areas_sel) != set(areas_disponibles):
+        for a in areas_sel:
+            chips.append(f'<span class="fchip fchip-area">🏢 {a}</span>')
+    if bool(emp_sel) and set(emp_sel) != set(empleados_disp):
+        shown = emp_sel[:4]
+        rest = len(emp_sel) - len(shown)
+        for e in shown:
+            chips.append(f'<span class="fchip fchip-emp">👤 {e}</span>')
+        if rest > 0:
+            chips.append(f'<span class="fchip fchip-emp">+{rest} más</span>')
+    if bool(est_sel) and set(est_sel) != set(estados):
+        for s in est_sel:
+            chips.append(f'<span class="fchip fchip-est">📊 {s}</span>')
+
+    count_html = (
+        f'<span class="fchip fchip-none">📋 {filtrados} / {total} registros</span>'
+    )
+
+    if not chips:
+        return (
+            '<div class="filter-bar">'
+            + f'<span class="fchip fchip-none">Sin filtros activos</span>'
+            + count_html
+            + "</div>"
+        )
+    return '<div class="filter-bar">' + "".join(chips) + count_html + "</div>"
+
+
+def _filtros_inline(df: pd.DataFrame, areas_permitidas=None) -> pd.DataFrame:
+    """Filtros via popover + chips HTML que muestran las selecciones activas."""
     fechas_validas = df["Fecha de Turno"].dropna()
-    if not fechas_validas.empty:
-        fmin = fechas_validas.min()
-        fmax = fechas_validas.max()
-    else:
-        fmin = fmax = today_ecuador()
+    fmin = fechas_validas.min() if not fechas_validas.empty else today_ecuador()
+    fmax = fechas_validas.max() if not fechas_validas.empty else today_ecuador()
 
-    rango = st.sidebar.date_input(
-        "Rango de fechas de turno",
-        value=(fmin, fmax),
-        min_value=fmin,
-        max_value=fmax,
-        key="filtro_rango",
-    )
-
-    if areas_permitidas is None:
-        areas_disponibles = AREAS
-    else:
-        areas_disponibles = [a for a in AREAS if a in areas_permitidas]
-
-    areas_sel = st.sidebar.multiselect(
-        "Áreas",
-        areas_disponibles,
-        default=areas_disponibles,
-        key="filtro_area",
-    )
-
-    empleados_disp = sorted(df["Nombre"].dropna().unique().tolist())
-    emp_sel = st.sidebar.multiselect("Empleados", empleados_disp, default=empleados_disp, key="filtro_emp")
-
+    areas_disponibles = AREAS if areas_permitidas is None else [a for a in AREAS if a in areas_permitidas]
     estados = ["Completo", "Abierto", "Revision"]
-    est_sel = st.sidebar.multiselect("Estado", estados, default=estados, key="filtro_est")
 
+    # Leer áreas activas primero para restringir el listado de empleados
+    cur_areas = st.session_state.get("filtro_area", areas_disponibles)
+
+    areas_activas  = cur_areas if cur_areas else areas_disponibles
+    empleados_disp = sorted(
+        df[df["Area"].isin(areas_activas)]["Nombre"].dropna().unique().tolist()
+    )
+
+    # Limpiar empleados fuera del área activa
+    cur_emp_raw = st.session_state.get("filtro_emp", empleados_disp)
+    cur_emp = [e for e in cur_emp_raw if e in empleados_disp]
+    if cur_emp != cur_emp_raw:
+        st.session_state["filtro_emp"] = cur_emp
+
+    # Botones de control
+    c_pop, c_reset = st.columns([1.5, 1])
+    with c_pop:
+        with st.popover("⚙️ Editar filtros", use_container_width=True):
+            st.date_input(
+                "📅 Rango de fechas",
+                value=(fmin, fmax),
+                min_value=fmin,
+                max_value=fmax,
+                key="filtro_rango",
+            )
+            st.multiselect("🏢 Área",     areas_disponibles, default=areas_disponibles, key="filtro_area")
+            st.multiselect("👤 Empleado", empleados_disp,    default=empleados_disp,    key="filtro_emp")
+            st.multiselect("📊 Estado",   estados,           default=estados,           key="filtro_est")
+
+    with c_reset:
+        if st.button("↺ Restablecer filtros", use_container_width=True):
+            for k in ("filtro_rango", "filtro_area", "filtro_emp", "filtro_est"):
+                st.session_state.pop(k, None)
+            st.rerun()
+
+    # Releer tras renderizar el popover
+    rango     = st.session_state.get("filtro_rango", (fmin, fmax))
+    areas_sel = st.session_state.get("filtro_area", areas_disponibles)
+    emp_sel   = st.session_state.get("filtro_emp",  empleados_disp)
+    est_sel   = st.session_state.get("filtro_est",  estados)
+
+    # Aplicar filtros
     mask = pd.Series(True, index=df.index)
     if isinstance(rango, tuple) and len(rango) == 2 and all(rango):
         f_ini, f_fin = rango
         mask &= df["Fecha de Turno"].between(f_ini, f_fin)
-    mask &= df["Area"].isin(areas_sel)
-    mask &= df["Nombre"].isin(emp_sel)
-    mask &= df["Estado"].isin(est_sel)
+    areas_filtro = areas_sel if areas_sel else areas_disponibles
+    emp_filtro   = emp_sel   if emp_sel   else empleados_disp
+    est_filtro   = est_sel   if est_sel   else estados
+    mask &= df["Area"].isin(areas_filtro)
+    mask &= df["Nombre"].isin(emp_filtro)
+    mask &= df["Estado"].isin(est_filtro)
 
-    return df[mask].copy()
+    resultado = df[mask].copy()
+    total = len(df)
+    filtrados = len(resultado)
+
+    # Chips HTML con el resumen visual de filtros activos
+    st.markdown(
+        _build_filter_chips_html(
+            rango, fmin, fmax,
+            areas_sel, areas_disponibles,
+            emp_sel, empleados_disp,
+            est_sel, estados,
+            total, filtrados,
+        ),
+        unsafe_allow_html=True,
+    )
+
+    return resultado
 
 def _render_dashboard(df: pd.DataFrame) -> None:
     if df.empty:
@@ -423,7 +537,7 @@ def _render_dashboard(df: pd.DataFrame) -> None:
             interpolate="monotone",
         )
         .encode(
-            x=alt.X("Fecha de Turno:T", title="Fecha", axis=alt.Axis(format="%d %b", labelAngle=0)),
+            x=alt.X("yearmonthdate(Fecha de Turno):T", title="Fecha", axis=alt.Axis(format="%d %b", labelAngle=0)),
             y=alt.Y("Horas Trabajadas:Q", title="Horas trabajadas"),
             color=alt.Color(
                 "Nombre:N",
@@ -503,7 +617,7 @@ def _render_dashboard(df: pd.DataFrame) -> None:
             alt.Chart(por_area_dia)
             .mark_area(opacity=0.78, interpolate="monotone", line={"strokeWidth": 1.5})
             .encode(
-                x=alt.X("Fecha de Turno:T", title="Fecha", axis=alt.Axis(format="%d %b", labelAngle=0)),
+                x=alt.X("yearmonthdate(Fecha de Turno):T", title="Fecha", axis=alt.Axis(format="%d %b", labelAngle=0)),
                 y=alt.Y("Horas Trabajadas:Q", stack="zero", title="Horas"),
                 color=alt.Color(
                     "Area:N",
@@ -521,17 +635,64 @@ def _render_dashboard(df: pd.DataFrame) -> None:
         )
         st.altair_chart(chart_area, use_container_width=True)
 
+_ESTADO_ROW_BG = {
+    "Completo": "#F2FFF6",
+    "Abierto":  "#FFFDF0",
+    "Revision": "#FFF5F5",
+}
+
+def _style_tabla(df: pd.DataFrame):
+    """Aplica colores de fondo por fila según Estado y formatos de columna."""
+    def _row_bg(row):
+        bg = _ESTADO_ROW_BG.get(row.get("Estado", ""), "")
+        return [f"background-color: {bg}" if bg else ""] * len(row)
+
+    return df.style.apply(_row_bg, axis=1).format(
+        {
+            "Horas Trabajadas": lambda v: f"{v:.2f} h" if pd.notna(v) and v != 0 else "—",
+            "Horas Extra":      lambda v: f"{v:.2f} h" if pd.notna(v) and v != 0 else "—",
+        },
+        na_rep="—",
+    )
+
+
 def _render_tabla(df: pd.DataFrame) -> None:
     if df.empty:
         st.info("Sin registros en el rango filtrado.")
         return
 
-    if "Horas Extra" in df.columns:
-        df = df.copy()
-        df["Horas Extra"] = pd.to_numeric(df["Horas Extra"], errors="coerce").fillna(0).round(2)
+    df = df.copy()
+    for col in ("Horas Trabajadas", "Horas Extra"):
+        if col in df.columns:
+            df[col] = pd.to_numeric(df[col], errors="coerce").fillna(0).round(2)
 
-    st.caption(f"Mostrando **{len(df)}** registros.")
-    st.dataframe(df, use_container_width=True, hide_index=True)
+    # Leyenda de colores por estado
+    st.markdown(
+        '<div style="display:flex;gap:14px;align-items:center;margin-bottom:8px;font-size:0.78rem;font-weight:600;">'
+        '<span style="display:flex;align-items:center;gap:5px;"><span style="width:12px;height:12px;border-radius:3px;background:#F2FFF6;border:1px solid #6FCF97;display:inline-block;"></span>Completo</span>'
+        '<span style="display:flex;align-items:center;gap:5px;"><span style="width:12px;height:12px;border-radius:3px;background:#FFFDF0;border:1px solid #F5CC7A;display:inline-block;"></span>Abierto</span>'
+        '<span style="display:flex;align-items:center;gap:5px;"><span style="width:12px;height:12px;border-radius:3px;background:#FFF5F5;border:1px solid #F5A0A6;display:inline-block;"></span>Revisión</span>'
+        '</div>',
+        unsafe_allow_html=True,
+    )
+
+    st.dataframe(
+        _style_tabla(df),
+        use_container_width=True,
+        hide_index=True,
+        height=540,
+        column_config={
+            "Nombre":            st.column_config.TextColumn("Empleado",         width="medium"),
+            "Area":              st.column_config.TextColumn("Área",             width="small"),
+            "Fecha de Turno":    st.column_config.DateColumn("Fecha",            width="small",  format="DD/MM/YYYY"),
+            "Timestamp Entrada": st.column_config.TextColumn("Entrada",          width="medium"),
+            "Timestamp Salida":  st.column_config.TextColumn("Salida",           width="medium"),
+            "Horas Trabajadas":  st.column_config.TextColumn("Horas trabajadas", width="small"),
+            "Horas Extra":       st.column_config.TextColumn("Horas extra",      width="small"),
+            "Estado":            st.column_config.TextColumn("Estado",           width="small"),
+            "Observaciones":     st.column_config.TextColumn("Observaciones",    width="large"),
+        },
+    )
 
     csv = df.to_csv(index=False).encode("utf-8-sig")
     st.download_button(
@@ -542,10 +703,32 @@ def _render_tabla(df: pd.DataFrame) -> None:
         use_container_width=True,
     )
 
+def _time_input(label: str, default: time, key: str) -> time:
+    """Entrada HH:MM como dos campos numéricos con el separador ':' visible entre ellos."""
+    st.markdown(
+        f"<p style='font-size:.875rem;font-weight:600;margin:0 0 4px;'>{label}</p>",
+        unsafe_allow_html=True,
+    )
+    col_h, col_sep, col_m = st.columns([4, 1, 4])
+    with col_h:
+        h = st.number_input("HH", min_value=0, max_value=23, value=default.hour,
+                            key=f"{key}_h", label_visibility="collapsed")
+    with col_sep:
+        st.markdown(
+            "<div style='text-align:center;padding-top:6px;"
+            "font-size:1.4rem;font-weight:800;color:#1E2D78;line-height:2.2;'>:</div>",
+            unsafe_allow_html=True,
+        )
+    with col_m:
+        m = st.number_input("MM", min_value=0, max_value=59, value=default.minute,
+                            key=f"{key}_m", label_visibility="collapsed")
+    return time(int(h), int(m))
+
+
 def _render_correcciones(areas_permitidas=None) -> None:
     """Flujo para cerrar turnos abiertos o crear registros históricos. Solo super admin."""
     st.caption(
-        "Úsalo cuando un empleado olvidó marcar entrada, salida o ambas. "    
+        "Úsalo cuando un empleado olvidó marcar entrada, salida o ambas. "
         "Toda corrección queda registrada en 'Observaciones' con el prefijo 'Registro manual:' para auditoría."
     )
 
@@ -557,6 +740,49 @@ def _render_correcciones(areas_permitidas=None) -> None:
     if not areas_corr:
         st.warning("No tienes áreas habilitadas para realizar correcciones.")
         return
+
+    df_actual = leer_registros()
+
+    # --- Tabla de turnos pendientes ---
+    st.markdown("#### Turnos pendientes de corrección")
+    mask_area = df_actual["Area"].isin(areas_corr) if areas_corr else pd.Series(False, index=df_actual.index)
+    mask_estado = df_actual["Estado"].fillna("").str.strip() == "Revision"
+    df_pendientes = df_actual[mask_area & mask_estado][
+        ["Nombre", "Area", "Fecha de Turno", "Timestamp Entrada", "Estado", "Observaciones"]
+    ].copy()
+
+    if df_pendientes.empty:
+        st.success("No hay turnos pendientes de corrección.")
+    else:
+        st.warning(f"**{len(df_pendientes)} turno(s)** requieren corrección. Selecciona una fila para cargar el empleado automáticamente.")
+        sel = st.dataframe(
+            df_pendientes.reset_index(drop=True),
+            use_container_width=True,
+            selection_mode="single-row",
+            on_select="rerun",
+            key="tabla_pendientes",
+            column_config={
+                "Nombre": st.column_config.TextColumn("Empleado", width="medium"),
+                "Area": st.column_config.TextColumn("Área", width="small"),
+                "Fecha de Turno": st.column_config.TextColumn("Fecha Turno", width="small"),
+                "Timestamp Entrada": st.column_config.TextColumn("Entrada", width="medium"),
+                "Estado": st.column_config.TextColumn("Estado", width="small"),
+                "Observaciones": st.column_config.TextColumn("Observaciones", width="large"),
+            },
+        )
+        filas = sel.selection.rows if sel and hasattr(sel, "selection") else []
+        if filas:
+            fila_sel = df_pendientes.reset_index(drop=True).iloc[filas[0]]
+            new_area = fila_sel["Area"]
+            new_emp = fila_sel["Nombre"]
+            if new_area in areas_corr:
+                st.session_state["area_corr"] = new_area
+            lista_emp_prefill = EMPLEADOS_POR_AREA.get(new_area, [])
+            if new_emp in lista_emp_prefill:
+                st.session_state["emp_corr"] = new_emp
+
+    st.divider()
+    st.markdown("#### Formulario de corrección")
 
     ca_corr, ce_corr = st.columns(2)
     with ca_corr:
@@ -574,7 +800,6 @@ def _render_correcciones(areas_permitidas=None) -> None:
         key="modo_corr",
     )
 
-    df_actual = leer_registros()
     ahora_min = now_ecuador().replace(second=0, microsecond=0).time()
 
     if modo.startswith("Cerrar"):
@@ -599,13 +824,13 @@ def _render_correcciones(areas_permitidas=None) -> None:
             with c1:
                 f_sal = st.date_input("Fecha de salida", value=today_ecuador(), key="f_sal_close")
             with c2:
-                h_sal = st.time_input("Hora de salida", value=ahora_min, key="h_sal_close")
+                h_sal = _time_input("Hora de salida", ahora_min, "h_sal_close")
 
             st.markdown("**Observación** (el prefijo *Registro manual:* se añade automáticamente)")
             cp, cd = st.columns([1, 3])
             with cp:
                 st.text_input("Prefijo", value="Registro manual:", disabled=True,
-                              key="pref_close", label_visibility="collapsed")   
+                              key="pref_close", label_visibility="collapsed")
             with cd:
                 obs_det = st.text_input("Detalle", key="obs_close_det",
                                         placeholder="Describe el motivo del cierre manual...",
@@ -616,14 +841,14 @@ def _render_correcciones(areas_permitidas=None) -> None:
                 ts_ent = pd.to_datetime(df_actual.loc[idx_obj, "Timestamp Entrada"])
                 det = obs_det.strip()
                 if ts_sal <= ts_ent:
-                    st.error("La salida debe ser posterior a la entrada.")      
+                    st.error("La salida debe ser posterior a la entrada.")
                 elif not det:
                     st.error("⚠️ Ingresa un detalle válido en la observación (no puede quedar vacío).")
                 else:
                     horas = calcular_horas(ts_ent, ts_sal)
                     if horas > UMBRAL_HORAS_EXTRA and len(det) < MIN_JUSTIF_CHARS:
                         st.error(
-                            f"Las {horas} h exceden {UMBRAL_HORAS_EXTRA} h. "   
+                            f"Las {horas} h exceden {UMBRAL_HORAS_EXTRA} h. "
                             f"El detalle debe tener al menos {MIN_JUSTIF_CHARS} caracteres."
                         )
                     else:
@@ -631,24 +856,24 @@ def _render_correcciones(areas_permitidas=None) -> None:
                         if not guardar_salida(emp_corr, ts_entrada_str, ts_sal, horas, f"Registro manual: {det}"):
                             st.error("El turno ya no existe (puede haber sido modificado). Recarga la página.")
                         else:
-                            st.success(f"✅ Turno cerrado. Horas trabajadas: {horas}")
+                            st.toast(f"Turno cerrado · {horas:.2f} h trabajadas", icon="✅")
                             st.rerun()
     else:
         st.caption("Ambas marcas se ingresan manualmente. Úsalo solo para turnos ya pasados.")
         c1, c2 = st.columns(2)
         with c1:
             st.markdown("**Entrada**")
-            f_ent = st.date_input("Fecha", value=today_ecuador(), key="f_ent_m")   
-            h_ent = st.time_input("Hora", value=time(7, 0), key="h_ent_m")      
+            f_ent = st.date_input("Fecha", value=today_ecuador(), key="f_ent_m")
+            h_ent = _time_input("Hora", time(7, 0), "h_ent_m")
         with c2:
             st.markdown("**Salida**")
-            f_sal = st.date_input("Fecha", value=today_ecuador(), key="f_sal_m")   
-            h_sal = st.time_input("Hora", value=time(17, 0), key="h_sal_m")     
+            f_sal = st.date_input("Fecha", value=today_ecuador(), key="f_sal_m")
+            h_sal = _time_input("Hora", time(17, 0), "h_sal_m")
 
         st.markdown("**Observación** (el prefijo *Registro manual:* se añade automáticamente)")
         cp2, cd2 = st.columns([1, 3])
         with cp2:
-            st.text_input("Prefijo", value="Registro manual:", disabled=True,   
+            st.text_input("Prefijo", value="Registro manual:", disabled=True,
                           key="pref_m", label_visibility="collapsed")
         with cd2:
             obs_det = st.text_input("Detalle", key="obs_m_det",
@@ -664,15 +889,15 @@ def _render_correcciones(areas_permitidas=None) -> None:
                 st.error("La salida debe ser posterior a la entrada.")
             elif not det:
                 st.error("⚠️ Ingresa un detalle válido en la observación (no puede quedar vacío).")
-            elif buscar_turno_abierto_idx(df_actual, emp_corr) is not None:     
+            elif buscar_turno_abierto_idx(df_actual, emp_corr) is not None:
                 st.error(
                     f"{emp_corr} tiene un turno abierto. Ciérralo primero en el modo anterior."
                 )
             else:
                 horas = calcular_horas(ts_in, ts_out)
-                if horas > UMBRAL_HORAS_EXTRA and len(det) < MIN_JUSTIF_CHARS:  
+                if horas > UMBRAL_HORAS_EXTRA and len(det) < MIN_JUSTIF_CHARS:
                     st.error(
-                        f"Las {horas} h exceden {UMBRAL_HORAS_EXTRA} h. "       
+                        f"Las {horas} h exceden {UMBRAL_HORAS_EXTRA} h. "
                         f"El detalle debe tener al menos {MIN_JUSTIF_CHARS} caracteres."
                     )
                 else:
@@ -687,7 +912,7 @@ def _render_correcciones(areas_permitidas=None) -> None:
                         "Estado": "Completo",
                         "Observaciones": f"Registro manual: {det}",
                     })
-                    st.success(f"✅ Registro creado. Horas trabajadas: {horas}")
+                    st.toast(f"Registro creado · {horas:.2f} h trabajadas", icon="✅")
                     st.rerun()
 
 def vista_super_admin() -> None:
@@ -727,12 +952,13 @@ def vista_super_admin() -> None:
     df_raw = leer_registros()
     df_scope = _aplicar_scope_admin(df_raw, admin_user)
     df_dash = _preparar_df_dashboard(df_scope)
-    df_filt = _sidebar_filtros(df_dash, areas_permitidas=areas_permitidas)
 
     if areas_permitidas is None:
         st.caption("🔓 Acceso total a todas las áreas.")
     else:
         st.caption(f"🔐 Áreas habilitadas para este usuario: {', '.join(sorted(areas_permitidas))}")
+
+    df_filt = _filtros_inline(df_dash, areas_permitidas=areas_permitidas)
 
     tab_dash, tab_tabla, tab_corr = st.tabs(["📊 Dashboard", "📋 Tabla", "🛠️ Correcciones"])
     with tab_dash:

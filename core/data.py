@@ -12,7 +12,7 @@ import gspread
 import pandas as pd
 import streamlit as st
 
-from config import COLUMNAS, COLS_TEXTO, HORAS_BASE_TURNO, WORKSHEET_NAME
+from core.config import COLUMNAS, COLS_TEXTO, HORAS_BASE_TURNO, WORKSHEET_NAME
 
 _SA_KEYS = {
     "type", "project_id", "private_key_id", "private_key",
@@ -25,7 +25,7 @@ _header_cache = None
 _datetime_format_applied = False
 
 
-_INVISIBLE_RE = re.compile(r"[\u200B\u200C\u200D\u2060\uFEFF]")
+_INVISIBLE_RE = re.compile(r"[​‌‍⁠﻿]")
 
 
 def _normalizar_texto(value) -> str:
@@ -36,7 +36,7 @@ def _normalizar_texto(value) -> str:
     """
     s = str(value or "")
     s = _INVISIBLE_RE.sub("", s)
-    s = s.replace("\u00A0", " ")
+    s = s.replace(" ", " ")
     s = re.sub(r"\s+", " ", s)
     return s.strip()
 

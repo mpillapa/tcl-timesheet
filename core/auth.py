@@ -1,26 +1,26 @@
-﻿"""
+"""
 Control de acceso:
   1) Gate de red: device_key URL  ->  IP oficina (vía ipify)  ->  master_passsword.
   2) Selector de rol: colaborador (default) | super_admin.
   3) Login según rol:
        - Colaborador -> PIN personal de 4 dígitos.
-       - Super Admin -> usuario + contraseña contra secrets.super_admins.     
+       - Super Admin -> usuario + contraseña contra secrets.super_admins.
 """
 
 import streamlit as st
 from streamlit_javascript import st_javascript
 
-from employees import PIN_A_EMPLEADO, AREA_DE
+from core.employees import PIN_A_EMPLEADO, AREA_DE
 
 
-# ---------------------------------------------------------------------------   
+# ---------------------------------------------------------------------------
 # Helpers
-# ---------------------------------------------------------------------------   
+# ---------------------------------------------------------------------------
 def _obtener_ip_publica_browser():
     try:
         res = st_javascript(
             "await fetch('https://api.ipify.org?format=json')"
-            ".then(r => r.json()).then(d => d.ip).catch(() => 'ERROR')",        
+            ".then(r => r.json()).then(d => d.ip).catch(() => 'ERROR')",
             key="client_ip_ipify",
         )
     except Exception:
@@ -43,21 +43,21 @@ def logout() -> None:
         st.session_state.pop(k, None)
 
 
-# ---------------------------------------------------------------------------   
+# ---------------------------------------------------------------------------
 # Capa 1: gate de red
-# ---------------------------------------------------------------------------   
+# ---------------------------------------------------------------------------
 def _capa1_gate() -> None:
     try:
         auth_cfg = dict(st.secrets["auth"])
     except (KeyError, FileNotFoundError):
         auth_cfg = {}
-        
+
     allowed_ips = list(auth_cfg.get("allowed_ips", []))
     device_keys = list(auth_cfg.get("device_keys", []))
     master_password = str(auth_cfg.get("master_password", ""))
 
     try:
-        device_key_url = str(st.query_params.get("device_key", "") or "")       
+        device_key_url = str(st.query_params.get("device_key", "") or "")
     except Exception:
         device_key_url = ""
 
@@ -69,7 +69,7 @@ def _capa1_gate() -> None:
     ip_browser = _obtener_ip_publica_browser()
     if ip_browser is None:
         st.title("⏳ Verificando ubicación…")
-        st.caption("Un momento, confirmando que estás en la red autorizada.")  
+        st.caption("Un momento, confirmando que estás en la red autorizada.")
         st.stop()
 
     if ip_browser and ip_browser in allowed_ips:
@@ -80,7 +80,7 @@ def _capa1_gate() -> None:
     st.title("🔒 Acceso al marcador")
     if ip_browser:
         st.caption(
-            f"Estás fuera de la red autorizada (tu IP: {ip_browser}). "      
+            f"Estás fuera de la red autorizada (tu IP: {ip_browser}). "
             "Si eres supervisor, jefe o desarrollador, ingresa la contraseña maestra."
         )
     else:
@@ -107,9 +107,9 @@ def _capa1_gate() -> None:
     st.stop()
 
 
-# ---------------------------------------------------------------------------   
+# ---------------------------------------------------------------------------
 # Control Login
-# ---------------------------------------------------------------------------   
+# ---------------------------------------------------------------------------
 def _capa3_login_colaborador() -> None:
     c1, c2 = st.columns([4, 1])
     with c1:
@@ -168,15 +168,15 @@ def _capa3_login_super_admin() -> None:
     st.stop()
 
 
-# ---------------------------------------------------------------------------   
+# ---------------------------------------------------------------------------
 # Entrypoint
-# ---------------------------------------------------------------------------   
+# ---------------------------------------------------------------------------
 def check_access() -> None:
     if st.session_state.get("auth_ok"):
         return
     if not st.session_state.get("gate_passed"):
         _capa1_gate()
-        
+
     if "rol" not in st.session_state:
         st.session_state["rol"] = "colaborador"
 
