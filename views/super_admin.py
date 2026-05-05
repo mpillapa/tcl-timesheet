@@ -272,7 +272,7 @@ except AttributeError:
 
 AREAS_POR_ADMIN = {
     "dbuestan": {"IMPORT"},
-    "pmena": {"DOCUMENTAL", "SUPERVISORES"},
+    "pmena": None,
     "gproanio": {"BODEGA"},
     "fherrera": None,
     "mpillapa": None,
