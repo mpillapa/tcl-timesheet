@@ -7,6 +7,7 @@ from core.data import (
     leer_registros,
     append_registro,
     calcular_horas,
+    calcular_horas_efectivas,
     calcular_horas_extra,
     buscar_turno_abierto_idx,
 )
@@ -650,6 +651,7 @@ def _style_tabla(df: pd.DataFrame):
     return df.style.apply(_row_bg, axis=1).format(
         {
             "Horas Trabajadas": lambda v: f"{v:.2f} h" if pd.notna(v) and v != 0 else "—",
+            "Horas Efectivas":  lambda v: f"{v:.2f} h" if pd.notna(v) and v != 0 else "—",
             "Horas Extra":      lambda v: f"{v:.2f} h" if pd.notna(v) and v != 0 else "—",
         },
         na_rep="—",
@@ -662,7 +664,7 @@ def _render_tabla(df: pd.DataFrame) -> None:
         return
 
     df = df.copy()
-    for col in ("Horas Trabajadas", "Horas Extra"):
+    for col in ("Horas Trabajadas", "Horas Efectivas", "Horas Extra"):
         if col in df.columns:
             df[col] = pd.to_numeric(df[col], errors="coerce").fillna(0).round(2)
 
@@ -688,6 +690,7 @@ def _render_tabla(df: pd.DataFrame) -> None:
             "Timestamp Entrada": st.column_config.TextColumn("Entrada",          width="medium"),
             "Timestamp Salida":  st.column_config.TextColumn("Salida",           width="medium"),
             "Horas Trabajadas":  st.column_config.TextColumn("Horas trabajadas", width="small"),
+            "Horas Efectivas":   st.column_config.TextColumn("Horas efectivas",  width="small"),
             "Horas Extra":       st.column_config.TextColumn("Horas extra",      width="small"),
             "Estado":            st.column_config.TextColumn("Estado",           width="small"),
             "Observaciones":     st.column_config.TextColumn("Observaciones",    width="large"),
@@ -908,6 +911,7 @@ def _render_correcciones(areas_permitidas=None) -> None:
                         "Timestamp Entrada": ts_in.strftime(TS_FMT),
                         "Timestamp Salida": ts_out.strftime(TS_FMT),
                         "Horas Trabajadas": horas,
+                        "Horas Efectivas": calcular_horas_efectivas(horas),
                         "Horas Extra": calcular_horas_extra(horas),
                         "Estado": "Completo",
                         "Observaciones": f"Registro manual: {det}",

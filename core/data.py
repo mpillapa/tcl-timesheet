@@ -12,7 +12,7 @@ import gspread
 import pandas as pd
 import streamlit as st
 
-from core.config import COLUMNAS, COLS_TEXTO, HORAS_BASE_TURNO, WORKSHEET_NAME
+from core.config import COLUMNAS, COLS_TEXTO, HORAS_BASE_TURNO, HORAS_ALMUERZO, MIN_HORAS_ALMUERZO, WORKSHEET_NAME
 
 _SA_KEYS = {
     "type", "project_id", "private_key_id", "private_key",
@@ -21,7 +21,6 @@ _SA_KEYS = {
 }
 
 _worksheet = None
-_header_cache = None
 _datetime_format_applied = False
 
 
@@ -67,15 +66,9 @@ def _get_worksheet():
 
 
 def _get_header() -> list:
-    """Devuelve (y cachea) el header real de la hoja. Se usa para ordenar
-    los valores al escribir: así da igual el orden de columnas en la hoja,
-    cada valor cae bajo su nombre real."""
-    global _header_cache
-    if _header_cache is not None:
-        return _header_cache
-    ws = _get_worksheet()
-    _header_cache = ws.row_values(1)
-    return _header_cache
+    """Devuelve el header real de la hoja sin caché, para evitar desalineaciones
+    si se agregan columnas mientras la app está corriendo."""
+    return _get_worksheet().row_values(1)
 
 
 def _aplicar_formato_fecha_hora() -> None:
@@ -149,18 +142,25 @@ def leer_registros() -> pd.DataFrame:
             if col not in df.columns:
                 df[col] = ""
         df = df[COLUMNAS].copy()
+        df = df.astype(object)  # evita StringDtype en pandas 3.x al asignar valores numéricos
         for col in COLS_TEXTO:
             df[col] = df[col].astype(object).where(df[col].notna(), "")
             df[col] = df[col].map(_normalizar_texto)
 
-        # Compatibilidad: si hay filas antiguas sin "Horas Extra", se calcula en memoria.
+        # Compatibilidad: calcular columnas derivadas en filas antiguas que las tengan vacías.
         horas_num = pd.to_numeric(df["Horas Trabajadas"], errors="coerce")
+        horas_efect_num = pd.to_numeric(df["Horas Efectivas"], errors="coerce")
         horas_extra_num = pd.to_numeric(df["Horas Extra"], errors="coerce")
+        mask_falta_efect = horas_num.notna() & horas_efect_num.isna()
+        if mask_falta_efect.any():
+            df.loc[mask_falta_efect, "Horas Efectivas"] = horas_num[mask_falta_efect].apply(calcular_horas_efectivas)
         mask_falta_extra = horas_num.notna() & horas_extra_num.isna()
         if mask_falta_extra.any():
             df.loc[mask_falta_extra, "Horas Extra"] = horas_num[mask_falta_extra].apply(calcular_horas_extra)
         return df
-    except Exception:
+    except Exception as e:
+        import streamlit as st
+        st.error(f"Error leyendo Google Sheets: {type(e).__name__}: {e}")
         return pd.DataFrame({c: pd.Series(dtype=object) for c in COLUMNAS})
 
 
@@ -253,6 +253,11 @@ def actualizar_por_entrada(nombre: str, ts_entrada_str: str, cambios: dict) -> b
 
 def calcular_horas(ts_in: datetime, ts_out: datetime) -> float:
     return round((ts_out - ts_in).total_seconds() / 3600, 2)
+
+
+def calcular_horas_efectivas(horas_trabajadas: float) -> float:
+    h = float(horas_trabajadas)
+    return round(h - HORAS_ALMUERZO if h >= MIN_HORAS_ALMUERZO else h, 2)
 
 
 def calcular_horas_extra(horas_trabajadas: float) -> float:

@@ -12,6 +12,7 @@ from core.data import (
     append_registro,
     actualizar_por_entrada,
     calcular_horas,
+    calcular_horas_efectivas,
     calcular_horas_extra,
     buscar_turno_abierto_idx,
 )
@@ -38,6 +39,7 @@ def _crear_nueva_entrada(nombre: str, ahora: datetime) -> None:
         "Timestamp Entrada": ahora.strftime(TS_FMT),
         "Timestamp Salida": "",
         "Horas Trabajadas": "",
+        "Horas Efectivas": "",
         "Horas Extra": "",
         "Estado": "Abierto",
         "Observaciones": "",
@@ -65,6 +67,7 @@ def guardar_salida(nombre: str, ts_entrada_str: str, ts_salida, horas, observaci
     cambios = {
         "Timestamp Salida": ts_salida.strftime(TS_FMT),
         "Horas Trabajadas": horas,
+        "Horas Efectivas": calcular_horas_efectivas(horas),
         "Horas Extra": calcular_horas_extra(horas),
         "Estado": "Completo",
         "Observaciones": observacion,
@@ -138,6 +141,19 @@ def marcar_salida(nombre: str) -> None:
             f"❌ No se encontró un turno abierto para **{nombre}**. "
             "Si olvidaste marcar entrada, contacta a tu supervisor."
         )
+        from core.data import _normalizar_cmp
+        nombre_norm = _normalizar_cmp(nombre)
+        filas_persona = df[df["Nombre"].fillna("").map(_normalizar_cmp) == nombre_norm]
+        with st.expander("🔍 Diagnóstico (para el administrador)"):
+            st.write(f"**Nombre buscado (normalizado):** `{nombre_norm}`")
+            if filas_persona.empty:
+                st.write("No se encontró ninguna fila con ese nombre. Nombres únicos en la hoja:")
+                nombres_hoja = df["Nombre"].dropna().unique().tolist()
+                for n in nombres_hoja:
+                    st.code(f"{repr(n)}  →  norm: {repr(_normalizar_cmp(n))}")
+            else:
+                st.write(f"Filas encontradas para ese nombre ({len(filas_persona)}):")
+                st.dataframe(filas_persona[["Nombre", "Fecha de Turno", "Timestamp Entrada", "Estado"]].reset_index(drop=True))
         return
 
     ahora = now_ecuador()
