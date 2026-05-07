@@ -1,7 +1,7 @@
 import streamlit as st
 import pandas as pd
 import altair as alt
-from datetime import datetime, date, time
+from datetime import datetime, date, time, timedelta
 from core.auth import logout
 from core.data import (
     leer_registros,
@@ -326,9 +326,13 @@ def _preparar_df_dashboard(df: pd.DataFrame) -> pd.DataFrame:
 
     d["Horas Trabajadas"] = _parse_num_series(d["Horas Trabajadas"])
     d["Horas Extra"] = _parse_num_series(d.get("Horas Extra", pd.Series(index=d.index, dtype=object)))
+    d["Horas Efectivas"] = _parse_num_series(d.get("Horas Efectivas", pd.Series(index=d.index, dtype=object)))
     mask_falta_extra = d["Horas Trabajadas"].notna() & d["Horas Extra"].isna()
     if mask_falta_extra.any():
         d.loc[mask_falta_extra, "Horas Extra"] = d.loc[mask_falta_extra, "Horas Trabajadas"].apply(calcular_horas_extra)
+    mask_falta_efect = d["Horas Trabajadas"].notna() & d["Horas Efectivas"].isna()
+    if mask_falta_efect.any():
+        d.loc[mask_falta_efect, "Horas Efectivas"] = d.loc[mask_falta_efect, "Horas Trabajadas"].apply(calcular_horas_efectivas)
     return d
 
 def _build_filter_chips_html(
@@ -809,23 +813,31 @@ def _render_correcciones(areas_permitidas=None) -> None:
         emp_norm = str(emp_corr).strip()
         _nombre = df_actual["Nombre"].fillna("").astype(str).str.strip()
         _estado = df_actual["Estado"].fillna("").astype(str).str.strip()
-        _obs = df_actual["Observaciones"].fillna("").astype(str).str.strip()
-        mask_primary = (_nombre == emp_norm) & (_estado.isin(["Abierto", "Revision"]))
-        mask_legacy = (_nombre == emp_norm) & (_obs == "Abierto") & (_estado == "")
-        df_abiertos = df_actual[mask_primary | mask_legacy]
+        mask_revision = (_nombre == emp_norm) & (_estado == "Revision")
+        df_abiertos = df_actual[mask_revision]
         if df_abiertos.empty:
-            st.info(f"{emp_corr} no tiene turnos abiertos.")
+            st.info(f"{emp_corr} no tiene turnos en revisión pendientes de cierre.")
         else:
             opciones = {
                 f"Entrada {row['Timestamp Entrada']} (turno {row['Fecha de Turno']})": idx
                 for idx, row in df_abiertos.iterrows()
             }
-            elegido = st.selectbox("Turno abierto a cerrar", list(opciones.keys()), key="turno_sel")
+            elegido = st.selectbox("Turno en revisión a cerrar", list(opciones.keys()), key="turno_sel")
             idx_obj = opciones[elegido]
+
+            ts_ent = pd.to_datetime(df_actual.loc[idx_obj, "Timestamp Entrada"])
+            f_ent_date = ts_ent.date()
+            f_sal_max = f_ent_date + timedelta(days=2)
 
             c1, c2 = st.columns(2)
             with c1:
-                f_sal = st.date_input("Fecha de salida", value=today_ecuador(), key="f_sal_close")
+                f_sal = st.date_input(
+                    "Fecha de salida",
+                    value=f_ent_date,
+                    min_value=f_ent_date,
+                    max_value=f_sal_max,
+                    key="f_sal_close",
+                )
             with c2:
                 h_sal = _time_input("Hora de salida", ahora_min, "h_sal_close")
 
@@ -839,9 +851,13 @@ def _render_correcciones(areas_permitidas=None) -> None:
                                         placeholder="Describe el motivo del cierre manual...",
                                         label_visibility="collapsed")
 
+            confirm_largo = st.checkbox(
+                "Confirmo el cierre de un turno superior a 15 h",
+                key="confirm_turno_largo",
+            )
+
             if st.button("💾 Cerrar turno", key="btn_close"):
                 ts_sal = datetime.combine(f_sal, h_sal)
-                ts_ent = pd.to_datetime(df_actual.loc[idx_obj, "Timestamp Entrada"])
                 det = obs_det.strip()
                 if ts_sal <= ts_ent:
                     st.error("La salida debe ser posterior a la entrada.")
@@ -849,7 +865,12 @@ def _render_correcciones(areas_permitidas=None) -> None:
                     st.error("⚠️ Ingresa un detalle válido en la observación (no puede quedar vacío).")
                 else:
                     horas = calcular_horas(ts_ent, ts_sal)
-                    if horas > UMBRAL_HORAS_EXTRA and len(det) < MIN_JUSTIF_CHARS:
+                    if horas > 15 and not confirm_largo:
+                        st.warning(
+                            f"⚠️ El turno tiene **{horas:.2f} h**. "
+                            "Marca la casilla de confirmación antes de cerrar."
+                        )
+                    elif horas > UMBRAL_HORAS_EXTRA and len(det) < MIN_JUSTIF_CHARS:
                         st.error(
                             f"Las {horas} h exceden {UMBRAL_HORAS_EXTRA} h. "
                             f"El detalle debe tener al menos {MIN_JUSTIF_CHARS} caracteres."

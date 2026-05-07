@@ -20,7 +20,7 @@ from core.employees import AREA_DE
 from core.time_utils import now_ecuador
 
 
-AUTO_LOGOUT_SECONDS = 5
+AUTO_LOGOUT_SECONDS = 3
 ESTADO_REVISION = "Revision"
 
 
