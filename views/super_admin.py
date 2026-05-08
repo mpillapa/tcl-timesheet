@@ -778,8 +778,9 @@ def _render_correcciones(areas_permitidas=None) -> None:
             },
         )
         filas = sel.selection.rows if sel and hasattr(sel, "selection") else []
-        if filas:
-            fila_sel = df_pendientes.reset_index(drop=True).iloc[filas[0]]
+        df_pend_reset = df_pendientes.reset_index(drop=True)
+        if filas and filas[0] < len(df_pend_reset):
+            fila_sel = df_pend_reset.iloc[filas[0]]
             new_area = fila_sel["Area"]
             new_emp = fila_sel["Nombre"]
             if new_area in areas_corr:
