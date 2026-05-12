@@ -12,7 +12,7 @@ import gspread
 import pandas as pd
 import streamlit as st
 
-from core.config import COLUMNAS, COLS_TEXTO, HORAS_BASE_TURNO, HORAS_ALMUERZO, MIN_HORAS_ALMUERZO, WORKSHEET_NAME
+from core.config import COLUMNAS, COLS_TEXTO, HORAS_BASE_TURNO, HORAS_ALMUERZO, MIN_HORAS_ALMUERZO, WORKSHEET_NAME, WORKSHEET_HORAS_ESPERADAS
 
 _SA_KEYS = {
     "type", "project_id", "private_key_id", "private_key",
@@ -262,6 +262,41 @@ def calcular_horas_efectivas(horas_trabajadas: float) -> float:
 
 def calcular_horas_extra(horas_trabajadas: float) -> float:
     return round(max(0.0, float(horas_trabajadas) - HORAS_BASE_TURNO), 2)
+
+
+_MESES_NUM = {
+    "enero": 1, "febrero": 2, "marzo": 3, "abril": 4,
+    "mayo": 5, "junio": 6, "julio": 7, "agosto": 8,
+    "septiembre": 9, "octubre": 10, "noviembre": 11, "diciembre": 12,
+}
+
+
+def leer_horas_esperadas() -> pd.DataFrame:
+    """Lee la hoja 'Horas Esperadas' y devuelve un DataFrame con columnas
+    Año (int), Mes (int 1-12), Horas (float). Solo incluye filas con Horas definidas."""
+    try:
+        sh = _get_worksheet().spreadsheet
+        ws = sh.worksheet(WORKSHEET_HORAS_ESPERADAS)
+        values = ws.get_all_values()
+        if len(values) < 2:
+            return pd.DataFrame(columns=["Año", "Mes", "Horas"])
+
+        header = [_normalizar_texto(c).lower() for c in values[0]]
+        rows = values[1:]
+        df = pd.DataFrame(rows, columns=header)
+
+        df["Año"] = pd.to_numeric(df.get("año", pd.Series(dtype=object)), errors="coerce")
+        df["Mes"] = df.get("mes", pd.Series(dtype=object)).astype(str).str.strip().str.lower().map(_MESES_NUM)
+        horas_raw = df.get("horas", pd.Series(dtype=object)).astype(str).str.strip().replace("", pd.NA)
+        df["Horas"] = pd.to_numeric(horas_raw, errors="coerce")
+
+        df = df.dropna(subset=["Año", "Mes", "Horas"])
+        df["Año"] = df["Año"].astype(int)
+        df["Mes"] = df["Mes"].astype(int)
+        return df[["Año", "Mes", "Horas"]].reset_index(drop=True)
+    except Exception as e:
+        st.warning(f"No se pudo leer la hoja de horas esperadas: {type(e).__name__}: {e}")
+        return pd.DataFrame(columns=["Año", "Mes", "Horas"])
 
 
 def buscar_turno_abierto_idx(df: pd.DataFrame, nombre: str):

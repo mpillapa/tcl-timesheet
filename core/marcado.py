@@ -6,7 +6,7 @@ import time
 import pandas as pd
 import streamlit as st
 
-from core.config import TS_FMT, UMBRAL_OLVIDO_H, UMBRAL_HORAS_EXTRA, MIN_JUSTIF_CHARS
+from core.config import TS_FMT, UMBRAL_OLVIDO_H, UMBRAL_HORAS_EXTRA, MIN_JUSTIF_CHARS, MIN_MINUTOS_TURNO
 from core.data import (
     leer_registros,
     append_registro,
@@ -162,6 +162,15 @@ def marcar_salida(nombre: str) -> None:
     if ts_entrada is None:
         st.error("No se pudo interpretar la hora de entrada del turno. Contacta a tu supervisor.")
         return
+
+    minutos_transcurridos = (ahora - ts_entrada).total_seconds() / 60
+    if minutos_transcurridos < MIN_MINUTOS_TURNO:
+        st.warning(
+            f"⏳ Debes esperar al menos {MIN_MINUTOS_TURNO} minutos desde la entrada para marcar salida. "
+            f"Entrada registrada a las {ts_entrada.strftime('%H:%M:%S')}."
+        )
+        return
+
     horas = calcular_horas(ts_entrada, ahora)
 
     # Si excede el umbral, diferir guardado y pedir justificación en otro render.

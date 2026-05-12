@@ -40,3 +40,8 @@ UMBRAL_OLVIDO_H = 18
 # Horas por encima de este valor requieren justificación obligatoria.
 UMBRAL_HORAS_EXTRA = 9.5
 MIN_JUSTIF_CHARS = 10
+
+# Tiempo mínimo entre entrada y salida para permitir el marcado.
+MIN_MINUTOS_TURNO = 5
+
+WORKSHEET_HORAS_ESPERADAS = "Horas Esperadas"

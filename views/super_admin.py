@@ -5,6 +5,7 @@ from datetime import datetime, date, time, timedelta
 from core.auth import logout
 from core.data import (
     leer_registros,
+    leer_horas_esperadas,
     append_registro,
     calcular_horas,
     calcular_horas_efectivas,
@@ -335,16 +336,75 @@ def _preparar_df_dashboard(df: pd.DataFrame) -> pd.DataFrame:
         d.loc[mask_falta_efect, "Horas Efectivas"] = d.loc[mask_falta_efect, "Horas Trabajadas"].apply(calcular_horas_efectivas)
     return d
 
+def _iso_week_options(df: pd.DataFrame) -> dict:
+    """Devuelve {label: (lunes, domingo)} para cada semana ISO presente en el df."""
+    fechas = df["Fecha de Turno"].dropna()
+    if fechas.empty:
+        return {}
+    pares = sorted(
+        {(d.isocalendar()[0], d.isocalendar()[1]) for d in fechas},
+        reverse=True,
+    )
+    opciones = {}
+    for year, week in pares:
+        lunes = date.fromisocalendar(year, week, 1)
+        domingo = lunes + timedelta(days=6)
+        label = f"Sem. {week:02d} · {year}  ({lunes.day} {lunes.strftime('%b')} – {domingo.day} {domingo.strftime('%b')})"
+        opciones[label] = (lunes, domingo)
+    return opciones
+
+
+_SEM_TODAS = "— Todas las semanas —"
+_MES_TODOS = "— Todos los meses —"
+
+_MESES_ES = {
+    1: "Enero", 2: "Febrero", 3: "Marzo", 4: "Abril",
+    5: "Mayo", 6: "Junio", 7: "Julio", 8: "Agosto",
+    9: "Septiembre", 10: "Octubre", 11: "Noviembre", 12: "Diciembre",
+}
+
+
+def _month_options(df: pd.DataFrame) -> dict:
+    """Devuelve {label: (primer_dia, ultimo_dia)} para cada mes presente en el df."""
+    import calendar
+    fechas = df["Fecha de Turno"].dropna()
+    if fechas.empty:
+        return {}
+    pares = sorted(
+        {(d.year, d.month) for d in fechas},
+        reverse=True,
+    )
+    opciones = {}
+    for year, month in pares:
+        ultimo_dia = calendar.monthrange(year, month)[1]
+        primero = date(year, month, 1)
+        ultimo = date(year, month, ultimo_dia)
+        label = f"{_MESES_ES[month]} {year}"
+        opciones[label] = (primero, ultimo)
+    return opciones
+
+
+def _clear_quick_filters():
+    st.session_state["filtro_semana_iso"] = _SEM_TODAS
+    st.session_state["filtro_mes"] = _MES_TODOS
+
+
 def _build_filter_chips_html(
     rango, fmin, fmax,
     areas_sel, areas_disponibles,
     emp_sel, empleados_disp,
     est_sel, estados,
+    semana_key: str,
+    mes_key: str,
     total: int, filtrados: int,
 ) -> str:
     chips = []
 
-    if isinstance(rango, tuple) and len(rango) == 2 and (rango[0] != fmin or rango[1] != fmax):
+    if semana_key and semana_key != _SEM_TODAS:
+        chips.append(f'<span class="fchip fchip-date">🗓️ {semana_key.strip()}</span>')
+    elif mes_key and mes_key != _MES_TODOS:
+        chips.append(f'<span class="fchip fchip-date">📆 {mes_key}</span>')
+    elif isinstance(rango, tuple) and len(rango) == 2 and (rango[0] != fmin or rango[1] != fmax):
         chips.append(
             f'<span class="fchip fchip-date">📅 {rango[0].strftime("%d/%m/%y")} – {rango[1].strftime("%d/%m/%y")}</span>'
         )
@@ -399,16 +459,26 @@ def _filtros_inline(df: pd.DataFrame, areas_permitidas=None) -> pd.DataFrame:
     if cur_emp != cur_emp_raw:
         st.session_state["filtro_emp"] = cur_emp
 
+    semanas_iso  = _iso_week_options(df)
+    meses        = _month_options(df)
+    st.session_state["_semanas_iso_map"] = semanas_iso
+    st.session_state["_meses_map"] = meses
+    opciones_sem = [_SEM_TODAS] + list(semanas_iso.keys())
+    opciones_mes = [_MES_TODOS] + list(meses.keys())
+
     # Botones de control
     c_pop, c_reset = st.columns([1.5, 1])
     with c_pop:
         with st.popover("⚙️ Editar filtros", use_container_width=True):
+            st.selectbox("📆 Mes", opciones_mes, key="filtro_mes")
+            st.selectbox("🗓️ Semana ISO", opciones_sem, key="filtro_semana_iso")
             st.date_input(
                 "📅 Rango de fechas",
                 value=(fmin, fmax),
                 min_value=fmin,
                 max_value=fmax,
                 key="filtro_rango",
+                on_change=_clear_quick_filters,
             )
             st.multiselect("🏢 Área",     areas_disponibles, default=areas_disponibles, key="filtro_area")
             st.multiselect("👤 Empleado", empleados_disp,    default=empleados_disp,    key="filtro_emp")
@@ -416,21 +486,32 @@ def _filtros_inline(df: pd.DataFrame, areas_permitidas=None) -> pd.DataFrame:
 
     with c_reset:
         if st.button("↺ Restablecer filtros", use_container_width=True):
-            for k in ("filtro_rango", "filtro_area", "filtro_emp", "filtro_est"):
+            for k in ("filtro_mes", "filtro_semana_iso", "filtro_rango", "filtro_area", "filtro_emp", "filtro_est"):
                 st.session_state.pop(k, None)
             st.rerun()
 
     # Releer tras renderizar el popover
-    rango     = st.session_state.get("filtro_rango", (fmin, fmax))
-    areas_sel = st.session_state.get("filtro_area", areas_disponibles)
-    emp_sel   = st.session_state.get("filtro_emp",  empleados_disp)
-    est_sel   = st.session_state.get("filtro_est",  estados)
+    semana_key   = st.session_state.get("filtro_semana_iso", _SEM_TODAS)
+    mes_key      = st.session_state.get("filtro_mes", _MES_TODOS)
+    rango_widget = st.session_state.get("filtro_rango", (fmin, fmax))
+    areas_sel    = st.session_state.get("filtro_area", areas_disponibles)
+    emp_sel      = st.session_state.get("filtro_emp",  empleados_disp)
+    est_sel      = st.session_state.get("filtro_est",  estados)
 
-    # Aplicar filtros
+    # Prioridad de fechas: semana ISO > mes > rango manual
+    # No se intenta escribir en el widget date_input desde callbacks (no funciona de forma fiable)
+    if semana_key != _SEM_TODAS and semana_key in semanas_iso:
+        rango = semanas_iso[semana_key]
+    elif mes_key != _MES_TODOS and mes_key in meses:
+        rango = meses[mes_key]
+    elif isinstance(rango_widget, tuple) and len(rango_widget) == 2 and all(rango_widget):
+        rango = rango_widget
+    else:
+        rango = (fmin, fmax)
+
     mask = pd.Series(True, index=df.index)
     if isinstance(rango, tuple) and len(rango) == 2 and all(rango):
-        f_ini, f_fin = rango
-        mask &= df["Fecha de Turno"].between(f_ini, f_fin)
+        mask &= df["Fecha de Turno"].between(rango[0], rango[1])
     areas_filtro = areas_sel if areas_sel else areas_disponibles
     emp_filtro   = emp_sel   if emp_sel   else empleados_disp
     est_filtro   = est_sel   if est_sel   else estados
@@ -442,13 +523,14 @@ def _filtros_inline(df: pd.DataFrame, areas_permitidas=None) -> pd.DataFrame:
     total = len(df)
     filtrados = len(resultado)
 
-    # Chips HTML con el resumen visual de filtros activos
     st.markdown(
         _build_filter_chips_html(
             rango, fmin, fmax,
             areas_sel, areas_disponibles,
             emp_sel, empleados_disp,
             est_sel, estados,
+            semana_key,
+            mes_key,
             total, filtrados,
         ),
         unsafe_allow_html=True,
@@ -464,7 +546,7 @@ def _render_dashboard(df: pd.DataFrame) -> None:
     completos = df[df["Estado"] == "Completo"]
     abiertos = df[df["Estado"] == "Abierto"]
     revision = df[df["Estado"] == "Revision"]
-    total_horas = float(completos["Horas Trabajadas"].sum(skipna=True))
+    total_horas = float(completos["Horas Efectivas"].sum(skipna=True))
     horas_extra = float(completos["Horas Extra"].sum(skipna=True))
     funcionarios_activos = int(completos["Nombre"].nunique())
     promedio_turno = total_horas / len(completos) if len(completos) else 0.0
@@ -560,85 +642,272 @@ def _render_dashboard(df: pd.DataFrame) -> None:
     )
     st.altair_chart(chart_lineas, use_container_width=True)
 
-    c_left, c_right = st.columns(2, gap="large")
+    _section_title("📊 Horas efectivas y horas extra por funcionario")
+    agg_emp = (
+        completos.groupby("Nombre", dropna=True)[["Horas Efectivas", "Horas Extra"]]
+        .sum()
+        .reset_index()
+        .sort_values("Horas Efectivas", ascending=False)
+        .head(12)
+    )
 
-    with c_left:
-        _section_title("📊 Horas y horas extra por funcionario")
-        agg_emp = (
-            completos.groupby("Nombre", dropna=True)[["Horas Trabajadas", "Horas Extra"]]
-            .sum()
-            .reset_index()
-            .sort_values("Horas Trabajadas", ascending=False)
-            .head(12)
+    barras = agg_emp.melt(
+        id_vars=["Nombre"],
+        value_vars=["Horas Efectivas", "Horas Extra"],
+        var_name="Indicador",
+        value_name="Horas",
+    )
+    orden_nombres = agg_emp["Nombre"].tolist()
+    chart_barras = (
+        alt.Chart(barras)
+        .mark_bar(cornerRadiusTopLeft=4, cornerRadiusTopRight=4)
+        .encode(
+            x=alt.X(
+                "Nombre:N",
+                sort=orden_nombres,
+                title="Funcionario",
+                axis=alt.Axis(labelAngle=-35, labelLimit=120),
+            ),
+            y=alt.Y("Horas:Q", title="Horas"),
+            color=alt.Color(
+                "Indicador:N",
+                title=None,
+                scale=alt.Scale(
+                    domain=["Horas Efectivas", "Horas Extra"],
+                    range=[BRAND_NAVY, BRAND_RED],
+                ),
+                legend=alt.Legend(orient="top", symbolType="square"),
+            ),
+            xOffset=alt.XOffset("Indicador:N"),
+            tooltip=[
+                alt.Tooltip("Nombre:N", title="Funcionario"),
+                alt.Tooltip("Indicador:N", title="Indicador"),
+                alt.Tooltip("Horas:Q", title="Horas", format=".2f"),
+            ],
         )
+        .properties(height=360)
+    )
+    st.altair_chart(chart_barras, use_container_width=True)
 
-        barras = agg_emp.melt(
-            id_vars=["Nombre"],
-            value_vars=["Horas Trabajadas", "Horas Extra"],
-            var_name="Indicador",
-            value_name="Horas",
+    _section_title("🗂️ Distribución de horas por área")
+    por_area_dia = (
+        completos.groupby(["Fecha de Turno", "Area"], dropna=True)["Horas Trabajadas"]
+        .sum()
+        .reset_index()
+        .sort_values("Fecha de Turno")
+    )
+    chart_area = (
+        alt.Chart(por_area_dia)
+        .mark_area(opacity=0.78, interpolate="monotone", line={"strokeWidth": 1.5})
+        .encode(
+            x=alt.X("yearmonthdate(Fecha de Turno):T", title="Fecha", axis=alt.Axis(format="%d %b", labelAngle=0)),
+            y=alt.Y("Horas Trabajadas:Q", stack="zero", title="Horas"),
+            color=alt.Color(
+                "Area:N",
+                title="Área",
+                scale=alt.Scale(range=BRAND_CATEGORICAL),
+                legend=alt.Legend(orient="bottom", symbolType="square"),
+            ),
+            tooltip=[
+                alt.Tooltip("Fecha de Turno:T", title="Fecha", format="%d %b %Y"),
+                alt.Tooltip("Area:N", title="Área"),
+                alt.Tooltip("Horas Trabajadas:Q", title="Horas", format=".2f"),
+            ],
         )
-        orden_nombres = agg_emp["Nombre"].tolist()
-        chart_barras = (
-            alt.Chart(barras)
+        .properties(height=360)
+    )
+    st.altair_chart(chart_area, use_container_width=True)
+
+def _color_cumpl(val: float) -> str:
+    if val >= 95:
+        return "background-color: #d4edda; color: #155724"
+    if val >= 70:
+        return "background-color: #fff3cd; color: #856404"
+    return "background-color: #f8d7da; color: #721c24"
+
+
+def _render_comparativo_horas(df: pd.DataFrame) -> None:
+    completos = df[df["Estado"] == "Completo"]
+    df_esperadas = leer_horas_esperadas()
+
+    if df_esperadas.empty:
+        st.info("No hay datos de horas esperadas cargados en la hoja 'Horas Esperadas'.")
+        return
+
+    if completos.empty:
+        st.info("Sin turnos completos en el rango filtrado.")
+        return
+
+    comp_mes = completos.copy()
+    comp_mes["Año"] = comp_mes["Fecha de Turno"].apply(lambda d: d.year if pd.notna(d) else None)
+    comp_mes["Mes"] = comp_mes["Fecha de Turno"].apply(lambda d: d.month if pd.notna(d) else None)
+    comp_mes = comp_mes.dropna(subset=["Año", "Mes"])
+    comp_mes["Año"] = comp_mes["Año"].astype(int)
+    comp_mes["Mes"] = comp_mes["Mes"].astype(int)
+
+    # ── Gráfico mensual (total equipo) ──────────────────────────────────────
+    _section_title("🎯 Horas esperadas vs efectivas por mes (total equipo)")
+    st.caption("Las horas esperadas se escalan por el número de funcionarios activos cada mes.")
+
+    activos_por_mes = (
+        comp_mes.groupby(["Año", "Mes"])["Nombre"]
+        .nunique()
+        .reset_index()
+        .rename(columns={"Nombre": "N_Activos"})
+    )
+    actual_mes = (
+        comp_mes.groupby(["Año", "Mes"])["Horas Efectivas"]
+        .sum()
+        .reset_index()
+        .rename(columns={"Horas Efectivas": "Reales"})
+    )
+
+    comp_chart = (
+        df_esperadas
+        .merge(actual_mes, on=["Año", "Mes"], how="left")
+        .merge(activos_por_mes, on=["Año", "Mes"], how="left")
+    )
+    comp_chart["Reales"] = comp_chart["Reales"].fillna(0)
+    comp_chart["N_Activos"] = comp_chart["N_Activos"].fillna(0).astype(int)
+    comp_chart["Esperadas"] = comp_chart["Horas"] * comp_chart["N_Activos"]
+    comp_chart = comp_chart.drop(columns=["Horas"]).sort_values(["Año", "Mes"])
+    comp_chart["Periodo"] = comp_chart.apply(
+        lambda r: f"{_MESES_ES[int(r['Mes'])][:3]} {int(r['Año'])}", axis=1
+    )
+    comp_chart["% Cumplimiento"] = (
+        comp_chart["Reales"] / comp_chart["Esperadas"].replace(0, pd.NA) * 100
+    ).fillna(0).round(1)
+
+    comp_chart_visible = comp_chart[comp_chart["N_Activos"] > 0]
+
+    if comp_chart_visible.empty:
+        st.info("No hay datos en el período filtrado para comparar con horas esperadas.")
+    else:
+        orden_periodos = comp_chart_visible["Periodo"].tolist()
+        barras_comp = comp_chart_visible.melt(
+            id_vars=["Periodo", "% Cumplimiento", "N_Activos"],
+            value_vars=["Esperadas", "Reales"],
+            var_name="Tipo",
+            value_name="H",
+        )
+        chart_comp = (
+            alt.Chart(barras_comp)
             .mark_bar(cornerRadiusTopLeft=4, cornerRadiusTopRight=4)
             .encode(
-                x=alt.X(
-                    "Nombre:N",
-                    sort=orden_nombres,
-                    title="Funcionario",
-                    axis=alt.Axis(labelAngle=-35, labelLimit=120),
-                ),
-                y=alt.Y("Horas:Q", title="Horas"),
+                x=alt.X("Periodo:N", sort=orden_periodos, title="Mes", axis=alt.Axis(labelAngle=0)),
+                y=alt.Y("H:Q", title="Horas"),
                 color=alt.Color(
-                    "Indicador:N",
+                    "Tipo:N",
                     title=None,
                     scale=alt.Scale(
-                        domain=["Horas Trabajadas", "Horas Extra"],
-                        range=[BRAND_NAVY, BRAND_RED],
+                        domain=["Esperadas", "Reales"],
+                        range=[BRAND_NAVY_SOFT, BRAND_NAVY],
                     ),
                     legend=alt.Legend(orient="top", symbolType="square"),
                 ),
-                xOffset=alt.XOffset("Indicador:N"),
+                xOffset=alt.XOffset("Tipo:N"),
                 tooltip=[
-                    alt.Tooltip("Nombre:N", title="Funcionario"),
-                    alt.Tooltip("Indicador:N", title="Indicador"),
-                    alt.Tooltip("Horas:Q", title="Horas", format=".2f"),
+                    alt.Tooltip("Periodo:N", title="Mes"),
+                    alt.Tooltip("Tipo:N", title="Tipo"),
+                    alt.Tooltip("H:Q", title="Horas", format=".1f"),
+                    alt.Tooltip("N_Activos:Q", title="Funcionarios activos", format="d"),
+                    alt.Tooltip("% Cumplimiento:Q", title="% Cumpl.", format=".1f"),
                 ],
             )
-            .properties(height=340)
+            .properties(height=360)
         )
-        st.altair_chart(chart_barras, use_container_width=True)
+        st.altair_chart(chart_comp, use_container_width=True)
 
-    with c_right:
-        _section_title("🗂️ Distribución de horas por área")
-        por_area_dia = (
-            completos.groupby(["Fecha de Turno", "Area"], dropna=True)["Horas Trabajadas"]
-            .sum()
-            .reset_index()
-            .sort_values("Fecha de Turno")
-        )
-        chart_area = (
-            alt.Chart(por_area_dia)
-            .mark_area(opacity=0.78, interpolate="monotone", line={"strokeWidth": 1.5})
-            .encode(
-                x=alt.X("yearmonthdate(Fecha de Turno):T", title="Fecha", axis=alt.Axis(format="%d %b", labelAngle=0)),
-                y=alt.Y("Horas Trabajadas:Q", stack="zero", title="Horas"),
-                color=alt.Color(
-                    "Area:N",
-                    title="Área",
-                    scale=alt.Scale(range=BRAND_CATEGORICAL),
-                    legend=alt.Legend(orient="bottom", symbolType="square"),
-                ),
-                tooltip=[
-                    alt.Tooltip("Fecha de Turno:T", title="Fecha", format="%d %b %Y"),
-                    alt.Tooltip("Area:N", title="Área"),
-                    alt.Tooltip("Horas Trabajadas:Q", title="Horas", format=".2f"),
-                ],
+        max_chips = 6
+        resumen_cols = st.columns(min(len(comp_chart_visible), max_chips))
+        for col, (_, row) in zip(resumen_cols, comp_chart_visible.iterrows()):
+            pct = row["% Cumplimiento"]
+            col.metric(
+                row["Periodo"],
+                f"{row['Reales']:.0f} h",
+                f"{pct:.0f}% de {row['Esperadas']:.0f} h ({int(row['N_Activos'])} func.)",
             )
-            .properties(height=340)
+
+    # ── Detalle por funcionario ──────────────────────────────────────────────
+    _section_title("👤 Horas efectivas vs esperadas por funcionario")
+    st.caption(
+        "Horas esperadas por persona = suma de horas del calendario "
+        "para cada mes en que el funcionario registró al menos un turno completo."
+    )
+
+    emp_mes = (
+        comp_mes.groupby(["Nombre", "Año", "Mes"])["Horas Efectivas"]
+        .sum()
+        .reset_index()
+    )
+    emp_mes = emp_mes.merge(df_esperadas, on=["Año", "Mes"], how="left")
+    emp_mes["Horas esp/mes"] = emp_mes["Horas"].fillna(0)
+
+    emp_agg = (
+        emp_mes.groupby("Nombre")
+        .agg(**{
+            "Horas Efectivas": ("Horas Efectivas", "sum"),
+            "Horas Esperadas": ("Horas esp/mes", "sum"),
+        })
+        .reset_index()
+    )
+    emp_agg["% Cumplimiento"] = (
+        emp_agg["Horas Efectivas"] / emp_agg["Horas Esperadas"].replace(0, pd.NA) * 100
+    ).fillna(0).round(1)
+    emp_agg = emp_agg.sort_values("Horas Efectivas", ascending=False)
+
+    barras_emp = emp_agg.melt(
+        id_vars=["Nombre", "% Cumplimiento"],
+        value_vars=["Horas Esperadas", "Horas Efectivas"],
+        var_name="Tipo",
+        value_name="H",
+    )
+    chart_emp = (
+        alt.Chart(barras_emp)
+        .mark_bar(cornerRadiusTopLeft=4, cornerRadiusTopRight=4)
+        .encode(
+            x=alt.X(
+                "Nombre:N",
+                sort=emp_agg["Nombre"].tolist(),
+                title="Funcionario",
+                axis=alt.Axis(labelAngle=-35, labelLimit=120),
+            ),
+            y=alt.Y("H:Q", title="Horas"),
+            color=alt.Color(
+                "Tipo:N",
+                title=None,
+                scale=alt.Scale(
+                    domain=["Horas Esperadas", "Horas Efectivas"],
+                    range=[BRAND_NAVY_SOFT, BRAND_NAVY],
+                ),
+                legend=alt.Legend(orient="top", symbolType="square"),
+            ),
+            xOffset=alt.XOffset("Tipo:N"),
+            tooltip=[
+                alt.Tooltip("Nombre:N", title="Funcionario"),
+                alt.Tooltip("Tipo:N", title="Tipo"),
+                alt.Tooltip("H:Q", title="Horas", format=".1f"),
+                alt.Tooltip("% Cumplimiento:Q", title="% Cumpl.", format=".1f"),
+            ],
         )
-        st.altair_chart(chart_area, use_container_width=True)
+        .properties(height=360)
+    )
+    st.altair_chart(chart_emp, use_container_width=True)
+
+    tabla_emp = emp_agg[["Nombre", "Horas Efectivas", "Horas Esperadas", "% Cumplimiento"]].copy()
+    tabla_emp = tabla_emp.sort_values("% Cumplimiento")
+    st.dataframe(
+        tabla_emp.style
+        .map(_color_cumpl, subset=["% Cumplimiento"])
+        .format({
+            "Horas Efectivas": "{:.1f} h",
+            "Horas Esperadas": "{:.1f} h",
+            "% Cumplimiento": "{:.1f}%",
+        }),
+        use_container_width=True,
+        hide_index=True,
+    )
+
 
 _ESTADO_ROW_BG = {
     "Completo": "#F2FFF6",
@@ -803,6 +1072,7 @@ def _render_correcciones(areas_permitidas=None) -> None:
         "¿Qué quieres hacer?",
         [
             "Cerrar un turno abierto (olvido de SALIDA)",
+            "Registrar entrada manual (sin salida aún)",
             "Crear registro histórico completo (olvido de ENTRADA y/o SALIDA)",
         ],
         key="modo_corr",
@@ -883,6 +1153,37 @@ def _render_correcciones(areas_permitidas=None) -> None:
                         else:
                             st.toast(f"Turno cerrado · {horas:.2f} h trabajadas", icon="✅")
                             st.rerun()
+    elif modo.startswith("Registrar entrada"):
+        st.caption("Crea un turno abierto con una hora de entrada pasada. El empleado marcará la salida normalmente.")
+        if buscar_turno_abierto_idx(df_actual, emp_corr) is not None:
+            st.warning(f"{emp_corr} ya tiene un turno abierto. Ciérralo primero antes de registrar una nueva entrada.")
+        else:
+            c1, c2 = st.columns(2)
+            with c1:
+                f_ent = st.date_input("Fecha de entrada", value=today_ecuador(), key="f_ent_manual")
+            with c2:
+                h_ent = _time_input("Hora de entrada", time(8, 0), "h_ent_manual")
+
+            if st.button("💾 Registrar entrada", key="btn_ent_manual"):
+                ts_in = datetime.combine(f_ent, h_ent)
+                if ts_in > now_ecuador():
+                    st.error("La hora de entrada no puede ser futura.")
+                else:
+                    append_registro({
+                        "Nombre": emp_corr,
+                        "Area": AREA_DE.get(emp_corr, ""),
+                        "Fecha de Turno": ts_in.strftime("%Y-%m-%d"),
+                        "Timestamp Entrada": ts_in.strftime(TS_FMT),
+                        "Timestamp Salida": "",
+                        "Horas Trabajadas": "",
+                        "Horas Efectivas": "",
+                        "Horas Extra": "",
+                        "Estado": "Abierto",
+                        "Observaciones": "Registro manual: entrada registrada por administrador",
+                    })
+                    st.toast(f"Entrada registrada para {emp_corr} a las {ts_in.strftime('%H:%M')}", icon="✅")
+                    st.rerun()
+
     else:
         st.caption("Ambas marcas se ingresan manualmente. Úsalo solo para turnos ya pasados.")
         c1, c2 = st.columns(2)
@@ -986,9 +1287,16 @@ def vista_super_admin() -> None:
 
     df_filt = _filtros_inline(df_dash, areas_permitidas=areas_permitidas)
 
-    tab_dash, tab_tabla, tab_corr = st.tabs(["📊 Dashboard", "📋 Tabla", "🛠️ Correcciones"])
+    tab_dash, tab_comp, tab_tabla, tab_corr = st.tabs([
+        "📊 Dashboard",
+        "📈 Comparativo horas esperadas",
+        "📋 Tabla",
+        "🛠️ Correcciones",
+    ])
     with tab_dash:
         _render_dashboard(df_filt)
+    with tab_comp:
+        _render_comparativo_horas(df_filt)
     with tab_tabla:
         _render_tabla(df_filt)
     with tab_corr:
