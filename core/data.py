@@ -165,23 +165,38 @@ def leer_registros() -> pd.DataFrame:
 
 
 def append_registro(fila: dict) -> None:
-    """Añade una fila atómicamente vía `Worksheet.append_row`.
+    """Inserta una fila en posición cronológica según Timestamp Entrada.
 
-    Google Sheets serializa los appends del lado del servidor, por lo que no
-    existe race condition: dos usuarios marcando entrada al mismo tiempo
-    generan dos filas nuevas, nunca una pisa a la otra.
-
-    Los valores se ordenan según el HEADER REAL de la hoja (no según la
-    constante COLUMNAS), para que cada valor caiga bajo su nombre de columna
-    sin importar el orden físico de las columnas en el sheet. `table_range`
-    ancla el append a la columna A para evitar desalineaciones si el
-    autodetect de Sheets falla.
+    Si el nuevo registro es el más reciente, usa append_row (atómico).
+    Si debe intercalarse entre filas existentes, usa insert_row en la
+    posición correcta para mantener el orden cronológico en la hoja.
     """
     ws = _get_worksheet()
     _aplicar_formato_fecha_hora()
-    header = _get_header()
+    all_values = ws.get_all_values()
+    header = all_values[0] if all_values else _get_header()
     row_values = [fila.get(col, "") for col in header]
-    ws.append_row(row_values, value_input_option="USER_ENTERED", table_range="A1")
+
+    ts_nueva = _ts_key(fila.get("Timestamp Entrada", ""))
+    insert_idx = None
+
+    if ts_nueva and len(all_values) > 1:
+        try:
+            i_entrada = header.index("Timestamp Entrada")
+        except ValueError:
+            i_entrada = None
+
+        if i_entrada is not None:
+            for row_idx, row in enumerate(all_values[1:], start=2):
+                ts_fila = _ts_key(row[i_entrada]) if i_entrada < len(row) else ""
+                if ts_fila and ts_fila > ts_nueva:
+                    insert_idx = row_idx
+                    break
+
+    if insert_idx is not None:
+        ws.insert_row(row_values, index=insert_idx, value_input_option="USER_ENTERED")
+    else:
+        ws.append_row(row_values, value_input_option="USER_ENTERED", table_range="A1")
 
 
 def _ts_key(raw) -> str:

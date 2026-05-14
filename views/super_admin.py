@@ -273,11 +273,14 @@ except AttributeError:
 
 
 AREAS_POR_ADMIN = {
-    "dbuestan": {"IMPORT"},
-    "pmena": None,
-    "gproanio": {"BODEGA"},
-    "fherrera": None,
-    "mpillapa": None,
+    "dbuestan":  {"IMPORT"},
+    "pmena":     None,
+    "gproanio":  {"BODEGA"},
+    "fherrera":  None,
+    "mpillapa":  None,
+    # Solo lectura
+    "ereyes":    {"BODEGA"},
+    "pmaldonado": {"BODEGA", "DOCUMENTAL", "SUPERVISORES", "CALIDAD"},
 }
 
 
@@ -915,6 +918,18 @@ _ESTADO_ROW_BG = {
     "Revision": "#FFF5F5",
 }
 
+def _dec_a_hhmm(v) -> str:
+    """Convierte horas decimales a formato HH:MM. Ej: 8.5 → '8:30'."""
+    if pd.isna(v) or v == 0:
+        return "—"
+    hh = int(v)
+    mm = round((v - hh) * 60)
+    if mm == 60:
+        hh += 1
+        mm = 0
+    return f"{hh}:{mm:02d}"
+
+
 def _style_tabla(df: pd.DataFrame):
     """Aplica colores de fondo por fila según Estado y formatos de columna."""
     def _row_bg(row):
@@ -923,9 +938,9 @@ def _style_tabla(df: pd.DataFrame):
 
     return df.style.apply(_row_bg, axis=1).format(
         {
-            "Horas Trabajadas": lambda v: f"{v:.2f} h" if pd.notna(v) and v != 0 else "—",
-            "Horas Efectivas":  lambda v: f"{v:.2f} h" if pd.notna(v) and v != 0 else "—",
-            "Horas Extra":      lambda v: f"{v:.2f} h" if pd.notna(v) and v != 0 else "—",
+            "Horas Trabajadas": _dec_a_hhmm,
+            "Horas Efectivas":  _dec_a_hhmm,
+            "Horas Extra":      _dec_a_hhmm,
         },
         na_rep="—",
     )
@@ -1001,6 +1016,125 @@ def _time_input(label: str, default: time, key: str) -> time:
     return time(int(h), int(m))
 
 
+@st.dialog("Confirmar registro manual")
+def _dialogo_confirmar_correccion() -> None:
+    payload = st.session_state.get("_corr_pendiente")
+    if not payload:
+        st.rerun()
+        return
+
+    modo = payload["modo"]
+    emp = payload["emp"]
+
+    def _fila(label: str, valor: str, color: str = BRAND_NAVY) -> str:
+        return (
+            f"<div style='display:flex;justify-content:space-between;align-items:center;"
+            f"padding:7px 0;border-bottom:1px solid #eef0f6;'>"
+            f"<span style='color:{BRAND_MUTED};font-size:.85rem;'>{label}</span>"
+            f"<span style='font-weight:600;color:{color};font-size:.95rem;'>{valor}</span>"
+            f"</div>"
+        )
+
+    filas_html = [
+        _fila("Empleado", emp),
+        _fila("Área", payload.get("area", "")),
+    ]
+
+    if modo == "cierre":
+        ts_ent: datetime = payload["ts_ent"]
+        ts_sal: datetime = payload["ts_sal"]
+        horas: float = payload["horas"]
+        filas_html += [
+            _fila("Acción", "Cierre de turno — registro de SALIDA"),
+            _fila("Entrada registrada", ts_ent.strftime("%d/%m/%Y  %H:%M")),
+            _fila("Salida a registrar", ts_sal.strftime("%d/%m/%Y  %H:%M"), BRAND_RED),
+            _fila("Duración", f"{horas:.2f} h"),
+            _fila("Observación", f"Registro manual: {payload['obs']}"),
+        ]
+
+    elif modo == "entrada":
+        ts_in: datetime = payload["ts_in"]
+        filas_html += [
+            _fila("Acción", "Registro de ENTRADA manual — turno quedará abierto"),
+            _fila("Fecha / Hora entrada", ts_in.strftime("%d/%m/%Y  %H:%M"), BRAND_RED),
+            _fila("Observación", "Registro manual: entrada registrada por administrador"),
+        ]
+
+    else:
+        ts_in = payload["ts_in"]
+        ts_out = payload["ts_out"]
+        horas = payload["horas"]
+        hef = calcular_horas_efectivas(horas)
+        hex_ = calcular_horas_extra(horas)
+        filas_html += [
+            _fila("Acción", "Registro histórico completo — ENTRADA y SALIDA"),
+            _fila("Entrada", ts_in.strftime("%d/%m/%Y  %H:%M")),
+            _fila("Salida", ts_out.strftime("%d/%m/%Y  %H:%M"), BRAND_RED),
+            _fila("Horas trabajadas", f"{horas:.2f} h"),
+            _fila("Horas efectivas", f"{hef:.2f} h"),
+            _fila("Horas extra", f"{hex_:.2f} h"),
+            _fila("Observación", f"Registro manual: {payload['obs']}"),
+        ]
+
+    st.markdown(
+        f"<div style='background:{BRAND_BG_SOFT};border-radius:10px;padding:4px 14px 8px;margin-bottom:12px;'>"
+        + "".join(filas_html)
+        + "</div>",
+        unsafe_allow_html=True,
+    )
+
+    st.divider()
+    bc, bx = st.columns(2)
+    with bc:
+        if st.button("Confirmar", type="primary", use_container_width=True, key="dlg_confirm"):
+            if modo == "cierre":
+                if not guardar_salida(
+                    emp, payload["ts_entrada_str"], payload["ts_sal"],
+                    payload["horas"], f"Registro manual: {payload['obs']}"
+                ):
+                    st.error("El turno ya no existe. Recarga la página.")
+                    return
+                st.toast(f"Turno cerrado · {payload['horas']:.2f} h", icon="✅")
+            elif modo == "entrada":
+                ts_in = payload["ts_in"]
+                append_registro({
+                    "Nombre": emp,
+                    "Area": AREA_DE.get(emp, ""),
+                    "Fecha de Turno": ts_in.strftime("%Y-%m-%d"),
+                    "Timestamp Entrada": ts_in.strftime(TS_FMT),
+                    "Timestamp Salida": "",
+                    "Horas Trabajadas": "",
+                    "Horas Efectivas": "",
+                    "Horas Extra": "",
+                    "Estado": "Abierto",
+                    "Observaciones": "Registro manual: entrada registrada por administrador",
+                })
+                st.toast(f"Entrada registrada · {ts_in.strftime('%H:%M')}", icon="✅")
+            else:
+                ts_in, ts_out = payload["ts_in"], payload["ts_out"]
+                horas = payload["horas"]
+                append_registro({
+                    "Nombre": emp,
+                    "Area": AREA_DE.get(emp, ""),
+                    "Fecha de Turno": ts_in.strftime("%Y-%m-%d"),
+                    "Timestamp Entrada": ts_in.strftime(TS_FMT),
+                    "Timestamp Salida": ts_out.strftime(TS_FMT),
+                    "Horas Trabajadas": horas,
+                    "Horas Efectivas": calcular_horas_efectivas(horas),
+                    "Horas Extra": calcular_horas_extra(horas),
+                    "Estado": "Completo",
+                    "Observaciones": f"Registro manual: {payload['obs']}",
+                })
+                st.toast(f"Registro creado · {horas:.2f} h", icon="✅")
+            st.session_state["_corr_pendiente"] = None
+            st.session_state["_corr_rev"] = st.session_state.get("_corr_rev", 0) + 1
+            st.rerun()
+    with bx:
+        if st.button("Cancelar", use_container_width=True, key="dlg_cancel"):
+            st.session_state["_corr_pendiente"] = None
+            st.rerun()
+
+
 def _render_correcciones(areas_permitidas=None) -> None:
     """Flujo para cerrar turnos abiertos o crear registros históricos. Solo super admin."""
     st.caption(
@@ -1052,21 +1186,40 @@ def _render_correcciones(areas_permitidas=None) -> None:
             fila_sel = df_pend_reset.iloc[filas[0]]
             new_area = fila_sel["Area"]
             new_emp = fila_sel["Nombre"]
+            rev_now = st.session_state.get("_corr_rev", 0)
             if new_area in areas_corr:
-                st.session_state["area_corr"] = new_area
+                st.session_state[f"area_corr_{rev_now}"] = new_area
             lista_emp_prefill = EMPLEADOS_POR_AREA.get(new_area, [])
             if new_emp in lista_emp_prefill:
-                st.session_state["emp_corr"] = new_emp
+                st.session_state[f"emp_corr_{rev_now}"] = new_emp
 
     st.divider()
     st.markdown("#### Formulario de corrección")
 
+    # rev cambia después de cada guardado exitoso, forzando reset de todos los widgets
+    rev = st.session_state.get("_corr_rev", 0)
+
+    opciones_area = [None] + list(areas_corr)
     ca_corr, ce_corr = st.columns(2)
     with ca_corr:
-        area_corr = st.selectbox("Área", areas_corr, key="area_corr")
+        area_corr = st.selectbox(
+            "Área",
+            opciones_area,
+            format_func=lambda x: "— Selecciona un área —" if x is None else x,
+            key=f"area_corr_{rev}",
+        )
     with ce_corr:
-        lista_empleados = EMPLEADOS_POR_AREA.get(area_corr, []) if area_corr else []
-        emp_corr = st.selectbox("Empleado a corregir", lista_empleados, key="emp_corr")
+        lista_empleados = [None] + list(EMPLEADOS_POR_AREA.get(area_corr, [])) if area_corr else [None]
+        emp_corr = st.selectbox(
+            "Empleado a corregir",
+            lista_empleados,
+            format_func=lambda x: "— Selecciona un empleado —" if x is None else x,
+            key=f"emp_corr_{rev}",
+        )
+
+    if emp_corr is None:
+        st.info("Selecciona un área y un empleado para continuar.")
+        return
 
     modo = st.radio(
         "¿Qué quieres hacer?",
@@ -1077,8 +1230,6 @@ def _render_correcciones(areas_permitidas=None) -> None:
         ],
         key="modo_corr",
     )
-
-    ahora_min = now_ecuador().replace(second=0, microsecond=0).time()
 
     if modo.startswith("Cerrar"):
         emp_norm = str(emp_corr).strip()
@@ -1093,7 +1244,7 @@ def _render_correcciones(areas_permitidas=None) -> None:
                 f"Entrada {row['Timestamp Entrada']} (turno {row['Fecha de Turno']})": idx
                 for idx, row in df_abiertos.iterrows()
             }
-            elegido = st.selectbox("Turno en revisión a cerrar", list(opciones.keys()), key="turno_sel")
+            elegido = st.selectbox("Turno en revisión a cerrar", list(opciones.keys()), key=f"turno_sel_{rev}")
             idx_obj = opciones[elegido]
 
             ts_ent = pd.to_datetime(df_actual.loc[idx_obj, "Timestamp Entrada"])
@@ -1104,55 +1255,63 @@ def _render_correcciones(areas_permitidas=None) -> None:
             with c1:
                 f_sal = st.date_input(
                     "Fecha de salida",
-                    value=f_ent_date,
+                    value=None,
                     min_value=f_ent_date,
                     max_value=f_sal_max,
-                    key="f_sal_close",
+                    key=f"f_sal_close_{rev}",
                 )
             with c2:
-                h_sal = _time_input("Hora de salida", ahora_min, "h_sal_close")
+                h_sal = _time_input("Hora de salida", time(0, 0), f"h_sal_close_{rev}")
 
             st.markdown("**Observación** (el prefijo *Registro manual:* se añade automáticamente)")
             cp, cd = st.columns([1, 3])
             with cp:
                 st.text_input("Prefijo", value="Registro manual:", disabled=True,
-                              key="pref_close", label_visibility="collapsed")
+                              key=f"pref_close_{rev}", label_visibility="collapsed")
             with cd:
-                obs_det = st.text_input("Detalle", key="obs_close_det",
+                obs_det = st.text_input("Detalle", key=f"obs_close_det_{rev}",
                                         placeholder="Describe el motivo del cierre manual...",
                                         label_visibility="collapsed")
 
             confirm_largo = st.checkbox(
                 "Confirmo el cierre de un turno superior a 15 h",
-                key="confirm_turno_largo",
+                key=f"confirm_turno_largo_{rev}",
             )
 
-            if st.button("💾 Cerrar turno", key="btn_close"):
-                ts_sal = datetime.combine(f_sal, h_sal)
+            if st.button("💾 Cerrar turno", key=f"btn_close_{rev}"):
                 det = obs_det.strip()
-                if ts_sal <= ts_ent:
-                    st.error("La salida debe ser posterior a la entrada.")
+                if f_sal is None:
+                    st.error("Selecciona una fecha de salida.")
                 elif not det:
-                    st.error("⚠️ Ingresa un detalle válido en la observación (no puede quedar vacío).")
+                    st.error("⚠️ Ingresa un detalle válido en la observación.")
                 else:
-                    horas = calcular_horas(ts_ent, ts_sal)
-                    if horas > 15 and not confirm_largo:
-                        st.warning(
-                            f"⚠️ El turno tiene **{horas:.2f} h**. "
-                            "Marca la casilla de confirmación antes de cerrar."
-                        )
-                    elif horas > UMBRAL_HORAS_EXTRA and len(det) < MIN_JUSTIF_CHARS:
-                        st.error(
-                            f"Las {horas} h exceden {UMBRAL_HORAS_EXTRA} h. "
-                            f"El detalle debe tener al menos {MIN_JUSTIF_CHARS} caracteres."
-                        )
+                    ts_sal = datetime.combine(f_sal, h_sal)
+                    if ts_sal <= ts_ent:
+                        st.error("La salida debe ser posterior a la entrada.")
                     else:
-                        ts_entrada_str = str(df_actual.loc[idx_obj, "Timestamp Entrada"])
-                        if not guardar_salida(emp_corr, ts_entrada_str, ts_sal, horas, f"Registro manual: {det}"):
-                            st.error("El turno ya no existe (puede haber sido modificado). Recarga la página.")
+                        horas = calcular_horas(ts_ent, ts_sal)
+                        if horas > 15 and not confirm_largo:
+                            st.warning(
+                                f"⚠️ El turno tiene **{horas:.2f} h**. "
+                                "Marca la casilla de confirmación antes de cerrar."
+                            )
+                        elif horas > UMBRAL_HORAS_EXTRA and len(det) < MIN_JUSTIF_CHARS:
+                            st.error(
+                                f"Las {horas} h exceden {UMBRAL_HORAS_EXTRA} h. "
+                                f"El detalle debe tener al menos {MIN_JUSTIF_CHARS} caracteres."
+                            )
                         else:
-                            st.toast(f"Turno cerrado · {horas:.2f} h trabajadas", icon="✅")
-                            st.rerun()
+                            st.session_state["_corr_pendiente"] = {
+                                "modo": "cierre",
+                                "emp": emp_corr,
+                                "area": AREA_DE.get(emp_corr, ""),
+                                "ts_ent": ts_ent.to_pydatetime(),
+                                "ts_sal": ts_sal,
+                                "horas": horas,
+                                "obs": det,
+                                "ts_entrada_str": str(df_actual.loc[idx_obj, "Timestamp Entrada"]),
+                            }
+
     elif modo.startswith("Registrar entrada"):
         st.caption("Crea un turno abierto con una hora de entrada pasada. El empleado marcará la salida normalmente.")
         if buscar_turno_abierto_idx(df_actual, emp_corr) is not None:
@@ -1160,93 +1319,94 @@ def _render_correcciones(areas_permitidas=None) -> None:
         else:
             c1, c2 = st.columns(2)
             with c1:
-                f_ent = st.date_input("Fecha de entrada", value=today_ecuador(), key="f_ent_manual")
+                f_ent = st.date_input("Fecha de entrada", value=None, key=f"f_ent_manual_{rev}")
             with c2:
-                h_ent = _time_input("Hora de entrada", time(8, 0), "h_ent_manual")
+                h_ent = _time_input("Hora de entrada", time(0, 0), f"h_ent_manual_{rev}")
 
-            if st.button("💾 Registrar entrada", key="btn_ent_manual"):
-                ts_in = datetime.combine(f_ent, h_ent)
-                if ts_in > now_ecuador():
-                    st.error("La hora de entrada no puede ser futura.")
+            if st.button("💾 Registrar entrada", key=f"btn_ent_manual_{rev}"):
+                if f_ent is None:
+                    st.error("Selecciona una fecha de entrada.")
                 else:
-                    append_registro({
-                        "Nombre": emp_corr,
-                        "Area": AREA_DE.get(emp_corr, ""),
-                        "Fecha de Turno": ts_in.strftime("%Y-%m-%d"),
-                        "Timestamp Entrada": ts_in.strftime(TS_FMT),
-                        "Timestamp Salida": "",
-                        "Horas Trabajadas": "",
-                        "Horas Efectivas": "",
-                        "Horas Extra": "",
-                        "Estado": "Abierto",
-                        "Observaciones": "Registro manual: entrada registrada por administrador",
-                    })
-                    st.toast(f"Entrada registrada para {emp_corr} a las {ts_in.strftime('%H:%M')}", icon="✅")
-                    st.rerun()
+                    ts_in = datetime.combine(f_ent, h_ent)
+                    if ts_in > now_ecuador():
+                        st.error("La hora de entrada no puede ser futura.")
+                    else:
+                        st.session_state["_corr_pendiente"] = {
+                            "modo": "entrada",
+                            "emp": emp_corr,
+                            "area": AREA_DE.get(emp_corr, ""),
+                            "ts_in": ts_in,
+                        }
 
     else:
         st.caption("Ambas marcas se ingresan manualmente. Úsalo solo para turnos ya pasados.")
         c1, c2 = st.columns(2)
         with c1:
             st.markdown("**Entrada**")
-            f_ent = st.date_input("Fecha", value=today_ecuador(), key="f_ent_m")
-            h_ent = _time_input("Hora", time(7, 0), "h_ent_m")
+            f_ent = st.date_input("Fecha", value=None, key=f"f_ent_m_{rev}")
+            h_ent = _time_input("Hora", time(0, 0), f"h_ent_m_{rev}")
         with c2:
             st.markdown("**Salida**")
-            f_sal = st.date_input("Fecha", value=today_ecuador(), key="f_sal_m")
-            h_sal = _time_input("Hora", time(17, 0), "h_sal_m")
+            f_sal = st.date_input("Fecha", value=None, key=f"f_sal_m_{rev}")
+            h_sal = _time_input("Hora", time(0, 0), f"h_sal_m_{rev}")
 
         st.markdown("**Observación** (el prefijo *Registro manual:* se añade automáticamente)")
         cp2, cd2 = st.columns([1, 3])
         with cp2:
             st.text_input("Prefijo", value="Registro manual:", disabled=True,
-                          key="pref_m", label_visibility="collapsed")
+                          key=f"pref_m_{rev}", label_visibility="collapsed")
         with cd2:
-            obs_det = st.text_input("Detalle", key="obs_m_det",
+            obs_det = st.text_input("Detalle", key=f"obs_m_det_{rev}",
                                     placeholder="Describe por qué se ingresa manualmente...",
                                     label_visibility="collapsed")
 
-        if st.button("💾 Crear registro", key="btn_m"):
-            ts_in = datetime.combine(f_ent, h_ent)
-            ts_out = datetime.combine(f_sal, h_sal)
+        if st.button("💾 Crear registro", key=f"btn_m_{rev}"):
             det = obs_det.strip()
-
-            if ts_out <= ts_in:
-                st.error("La salida debe ser posterior a la entrada.")
+            if f_ent is None or f_sal is None:
+                st.error("Selecciona fecha de entrada y salida.")
             elif not det:
-                st.error("⚠️ Ingresa un detalle válido en la observación (no puede quedar vacío).")
-            elif buscar_turno_abierto_idx(df_actual, emp_corr) is not None:
-                st.error(
-                    f"{emp_corr} tiene un turno abierto. Ciérralo primero en el modo anterior."
-                )
+                st.error("⚠️ Ingresa un detalle válido en la observación.")
             else:
-                horas = calcular_horas(ts_in, ts_out)
-                if horas > UMBRAL_HORAS_EXTRA and len(det) < MIN_JUSTIF_CHARS:
-                    st.error(
-                        f"Las {horas} h exceden {UMBRAL_HORAS_EXTRA} h. "
-                        f"El detalle debe tener al menos {MIN_JUSTIF_CHARS} caracteres."
-                    )
+                ts_in = datetime.combine(f_ent, h_ent)
+                ts_out = datetime.combine(f_sal, h_sal)
+                if ts_out <= ts_in:
+                    st.error("La salida debe ser posterior a la entrada.")
                 else:
-                    append_registro({
-                        "Nombre": emp_corr,
-                        "Area": AREA_DE.get(emp_corr, ""),
-                        "Fecha de Turno": ts_in.strftime("%Y-%m-%d"),
-                        "Timestamp Entrada": ts_in.strftime(TS_FMT),
-                        "Timestamp Salida": ts_out.strftime(TS_FMT),
-                        "Horas Trabajadas": horas,
-                        "Horas Efectivas": calcular_horas_efectivas(horas),
-                        "Horas Extra": calcular_horas_extra(horas),
-                        "Estado": "Completo",
-                        "Observaciones": f"Registro manual: {det}",
-                    })
-                    st.toast(f"Registro creado · {horas:.2f} h trabajadas", icon="✅")
-                    st.rerun()
+                    horas = calcular_horas(ts_in, ts_out)
+                    if horas > UMBRAL_HORAS_EXTRA and len(det) < MIN_JUSTIF_CHARS:
+                        st.error(
+                            f"Las {horas} h exceden {UMBRAL_HORAS_EXTRA} h. "
+                            f"El detalle debe tener al menos {MIN_JUSTIF_CHARS} caracteres."
+                        )
+                    else:
+                        st.session_state["_corr_pendiente"] = {
+                            "modo": "completo",
+                            "emp": emp_corr,
+                            "area": AREA_DE.get(emp_corr, ""),
+                            "ts_in": ts_in,
+                            "ts_out": ts_out,
+                            "horas": horas,
+                            "obs": det,
+                        }
+
+    if st.session_state.get("_corr_pendiente"):
+        _dialogo_confirmar_correccion()
+
+def _es_solo_lectura(admin_user: str) -> bool:
+    """Devuelve True si el usuario tiene solo_lectura = true en secrets."""
+    try:
+        cfg = st.secrets["super_admins"].get(admin_user, {})
+        return bool(cfg.get("solo_lectura", False))
+    except Exception:
+        return False
+
 
 def vista_super_admin() -> None:
     usuario = st.session_state["usuario"]
     admin_rol = st.session_state.get("admin_rol", "")
     admin_user = st.session_state.get("admin_user", "")
     areas_permitidas = _get_areas_permitidas(admin_user)
+    solo_lectura = _es_solo_lectura(admin_user)
 
     _inject_brand_css()
 
@@ -1283,21 +1443,35 @@ def vista_super_admin() -> None:
     if areas_permitidas is None:
         st.caption("🔓 Acceso total a todas las áreas.")
     else:
-        st.caption(f"🔐 Áreas habilitadas para este usuario: {', '.join(sorted(areas_permitidas))}")
+        st.caption(f"🔐 Áreas habilitadas: {', '.join(sorted(areas_permitidas))}" +
+                   ("  |  👁️ Solo lectura" if solo_lectura else ""))
 
     df_filt = _filtros_inline(df_dash, areas_permitidas=areas_permitidas)
 
-    tab_dash, tab_comp, tab_tabla, tab_corr = st.tabs([
-        "📊 Dashboard",
-        "📈 Comparativo horas esperadas",
-        "📋 Tabla",
-        "🛠️ Correcciones",
-    ])
-    with tab_dash:
-        _render_dashboard(df_filt)
-    with tab_comp:
-        _render_comparativo_horas(df_filt)
-    with tab_tabla:
-        _render_tabla(df_filt)
-    with tab_corr:
-        _render_correcciones(areas_permitidas=areas_permitidas)
+    if solo_lectura:
+        tab_dash, tab_comp, tab_tabla = st.tabs([
+            "📊 Dashboard",
+            "📈 Comparativo horas esperadas",
+            "📋 Tabla",
+        ])
+        with tab_dash:
+            _render_dashboard(df_filt)
+        with tab_comp:
+            _render_comparativo_horas(df_filt)
+        with tab_tabla:
+            _render_tabla(df_filt)
+    else:
+        tab_dash, tab_comp, tab_tabla, tab_corr = st.tabs([
+            "📊 Dashboard",
+            "📈 Comparativo horas esperadas",
+            "📋 Tabla",
+            "🛠️ Correcciones",
+        ])
+        with tab_dash:
+            _render_dashboard(df_filt)
+        with tab_comp:
+            _render_comparativo_horas(df_filt)
+        with tab_tabla:
+            _render_tabla(df_filt)
+        with tab_corr:
+            _render_correcciones(areas_permitidas=areas_permitidas)
