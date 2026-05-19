@@ -4,6 +4,7 @@ import time
 from core.auth import logout
 from core.marcado import (
     AUTO_LOGOUT_SECONDS,
+    _DEBOUNCE_ENTRADA_SECS,
     marcar_entrada,
     marcar_salida,
     render_formulario_justificacion,
@@ -41,9 +42,17 @@ def vista_colaborador() -> None:
 
     st.divider()
 
+    debounce_key = f"_debounce_entrada_{usuario}"
+    ultima_entrada = st.session_state.get(debounce_key)
+    entrada_bloqueada = (
+        ultima_entrada is not None
+        and (time.time() - ultima_entrada.timestamp()) < _DEBOUNCE_ENTRADA_SECS
+    )
+
     col1, col2 = st.columns(2)
     with col1:
-        if st.button("🟢 Marcar Entrada", use_container_width=True, type="primary"):
+        if st.button("🟢 Marcar Entrada", use_container_width=True, type="primary",
+                     disabled=entrada_bloqueada):
             marcar_entrada(usuario)
     with col2:
         if st.button("🔴 Marcar Salida", use_container_width=True):

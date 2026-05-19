@@ -22,6 +22,7 @@ from core.time_utils import now_ecuador
 
 AUTO_LOGOUT_SECONDS = 3
 ESTADO_REVISION = "Revision"
+_DEBOUNCE_ENTRADA_SECS = 8  # ventana para ignorar doble-click en Marcar Entrada
 
 
 def _fmt_duracion(horas: float) -> str:
@@ -76,9 +77,22 @@ def guardar_salida(nombre: str, ts_entrada_str: str, ts_salida, horas, observaci
 
 
 def marcar_entrada(nombre: str) -> None:
+    # Debounce: si ya se procesó una entrada en los últimos _DEBOUNCE_ENTRADA_SECS
+    # segundos para este mismo empleado, ignorar el clic extra (doble-click).
+    debounce_key = f"_debounce_entrada_{nombre}"
+    ahora = now_ecuador()
+    ultima = st.session_state.get(debounce_key)
+    if ultima and (ahora - ultima).total_seconds() < _DEBOUNCE_ENTRADA_SECS:
+        # Segundo clic detectado. Si el primer rerun fue interrumpido antes de
+        # llamar a programar_cierre_sesion(), arrancar el countdown desde aquí.
+        if not st.session_state.get("auto_logout_started_at"):
+            programar_cierre_sesion()
+        return
+    # Fijar el lock antes de cualquier I/O para que el segundo rerun vea el flag
+    st.session_state[debounce_key] = ahora
+
     df = leer_registros()
     idx_abierto = buscar_turno_abierto_idx(df, nombre)
-    ahora = now_ecuador()
 
     if idx_abierto is not None:
         ts_prev_str = str(df.loc[idx_abierto, "Timestamp Entrada"])
