@@ -7,6 +7,7 @@ from core.data import (
     leer_registros,
     leer_horas_esperadas,
     append_registro,
+    actualizar_por_entrada,
     calcular_horas,
     calcular_horas_efectivas,
     calcular_horas_extra,
@@ -550,10 +551,34 @@ def _render_dashboard(df: pd.DataFrame) -> None:
     abiertos = df[df["Estado"] == "Abierto"]
     revision = df[df["Estado"] == "Revision"]
     total_horas = float(completos["Horas Efectivas"].sum(skipna=True))
-    horas_extra = float(completos["Horas Extra"].sum(skipna=True))
     funcionarios_activos = int(completos["Nombre"].nunique())
     promedio_turno = total_horas / len(completos) if len(completos) else 0.0
-    pct_extra = (horas_extra / total_horas * 100) if total_horas > 0 else 0.0
+
+    # Cuota del período — misma lógica que el gráfico de progreso
+    df_esp = leer_horas_esperadas()
+    cuota_periodo = 0.0
+    if not df_esp.empty and not completos.empty:
+        meses_filtro = (
+            completos.assign(
+                Año=completos["Fecha de Turno"].apply(lambda d: int(d.year) if pd.notna(d) else None),
+                Mes=completos["Fecha de Turno"].apply(lambda d: int(d.month) if pd.notna(d) else None),
+            )
+            .dropna(subset=["Año", "Mes"])[["Año", "Mes"]]
+            .drop_duplicates()
+            .astype(int)
+        )
+        cuota_periodo = float(df_esp.merge(meses_filtro, on=["Año", "Mes"])["Horas"].sum())
+
+    if cuota_periodo > 0:
+        # Horas que cada empleado acumuló por encima de la cuota del período
+        agg_emp_kpi = completos.groupby("Nombre", dropna=True)["Horas Efectivas"].sum()
+        horas_sobre_cuota = float((agg_emp_kpi - cuota_periodo).clip(lower=0).sum())
+        kpi_extra_label = "Horas sobre cuota del período"
+        kpi_extra_sub = f"cuota: <b>{cuota_periodo:.0f} h</b>/persona · <b>{pct_sobre:.1f}%</b> del total" if (pct_sobre := (horas_sobre_cuota / total_horas * 100) if total_horas > 0 else 0.0) >= 0 else ""
+    else:
+        horas_sobre_cuota = float(completos["Horas Extra"].sum(skipna=True))
+        kpi_extra_label = f"Horas extra (>{HORAS_BASE_TURNO:.0f}h/turno)"
+        kpi_extra_sub = f"<b>{(horas_sobre_cuota / total_horas * 100) if total_horas > 0 else 0.0:.1f}%</b> del total" if total_horas > 0 else ""
 
     cards_html = (
         '<div class="kpi-grid">'
@@ -584,9 +609,9 @@ def _render_dashboard(df: pd.DataFrame) -> None:
         )
         + _kpi_card(
             "🔥", "#FDE7E9", BRAND_RED,
-            f"Horas extra (>{HORAS_BASE_TURNO:.0f}h)",
-            f"{max(0, horas_extra):,.1f}", "h",
-            f"<b>{pct_extra:.1f}%</b> del total" if total_horas > 0 else "",
+            kpi_extra_label,
+            f"{max(0, horas_sobre_cuota):,.1f}", "h",
+            kpi_extra_sub,
             accent=True,
         )
         + "</div>"
@@ -645,25 +670,38 @@ def _render_dashboard(df: pd.DataFrame) -> None:
     )
     st.altair_chart(chart_lineas, use_container_width=True)
 
-    _section_title("📊 Horas efectivas y horas extra por funcionario")
+    _section_title("📊 Progreso de horas por funcionario vs cuota del período")
+    st.caption("La barra azul crece con cada turno. Cuando supera la cuota del período, el exceso aparece en rojo.")
+
     agg_emp = (
-        completos.groupby("Nombre", dropna=True)[["Horas Efectivas", "Horas Extra"]]
+        completos.groupby("Nombre", dropna=True)["Horas Efectivas"]
         .sum()
         .reset_index()
-        .sort_values("Horas Efectivas", ascending=False)
+        .rename(columns={"Horas Efectivas": "Total Efectivas"})
+        .sort_values("Total Efectivas", ascending=False)
         .head(12)
     )
 
+    # cuota_periodo y df_esp ya calculados al inicio de la función
+
+    if cuota_periodo > 0:
+        agg_emp["Dentro de cuota"] = agg_emp["Total Efectivas"].clip(upper=cuota_periodo)
+        agg_emp["Sobre cuota"] = (agg_emp["Total Efectivas"] - cuota_periodo).clip(lower=0)
+    else:
+        agg_emp["Dentro de cuota"] = agg_emp["Total Efectivas"]
+        agg_emp["Sobre cuota"] = 0.0
+
+    orden_nombres = agg_emp["Nombre"].tolist()
     barras = agg_emp.melt(
         id_vars=["Nombre"],
-        value_vars=["Horas Efectivas", "Horas Extra"],
-        var_name="Indicador",
+        value_vars=["Dentro de cuota", "Sobre cuota"],
+        var_name="Segmento",
         value_name="Horas",
     )
-    orden_nombres = agg_emp["Nombre"].tolist()
+
     chart_barras = (
         alt.Chart(barras)
-        .mark_bar(cornerRadiusTopLeft=4, cornerRadiusTopRight=4)
+        .mark_bar(cornerRadiusTopLeft=3, cornerRadiusTopRight=3)
         .encode(
             x=alt.X(
                 "Nombre:N",
@@ -671,26 +709,38 @@ def _render_dashboard(df: pd.DataFrame) -> None:
                 title="Funcionario",
                 axis=alt.Axis(labelAngle=-35, labelLimit=120),
             ),
-            y=alt.Y("Horas:Q", title="Horas"),
+            y=alt.Y("Horas:Q", stack=True, title="Horas acumuladas"),
             color=alt.Color(
-                "Indicador:N",
+                "Segmento:N",
                 title=None,
                 scale=alt.Scale(
-                    domain=["Horas Efectivas", "Horas Extra"],
+                    domain=["Dentro de cuota", "Sobre cuota"],
                     range=[BRAND_NAVY, BRAND_RED],
                 ),
                 legend=alt.Legend(orient="top", symbolType="square"),
             ),
-            xOffset=alt.XOffset("Indicador:N"),
+            order=alt.Order("Segmento:N", sort="ascending"),
             tooltip=[
                 alt.Tooltip("Nombre:N", title="Funcionario"),
-                alt.Tooltip("Indicador:N", title="Indicador"),
-                alt.Tooltip("Horas:Q", title="Horas", format=".2f"),
+                alt.Tooltip("Segmento:N", title="Tramo"),
+                alt.Tooltip("Horas:Q", title="Horas", format=".1f"),
             ],
         )
         .properties(height=360)
     )
-    st.altair_chart(chart_barras, use_container_width=True)
+
+    if cuota_periodo > 0:
+        regla_cuota = (
+            alt.Chart(pd.DataFrame({"cuota": [cuota_periodo]}))
+            .mark_rule(strokeDash=[5, 4], color="#888888", strokeWidth=1.5)
+            .encode(y=alt.Y("cuota:Q", title=""))
+        )
+        chart_final = chart_barras + regla_cuota
+        st.altair_chart(chart_final, use_container_width=True)
+        st.caption(f"Línea punteada = cuota del período: **{cuota_periodo:.0f} h** por funcionario (hoja Horas Esperadas)")
+    else:
+        st.altair_chart(chart_barras, use_container_width=True)
+        st.caption("Sin cuota definida en 'Horas Esperadas' para los meses del período filtrado.")
 
     _section_title("🗂️ Distribución de horas por área")
     por_area_dia = (
@@ -1392,6 +1442,241 @@ def _render_correcciones(areas_permitidas=None) -> None:
     if st.session_state.get("_corr_pendiente"):
         _dialogo_confirmar_correccion()
 
+@st.dialog("Confirmar corrección de turno", width="large")
+def _dialogo_confirmar_edicion() -> None:
+    payload = st.session_state.get("_edit_pendiente")
+    if not payload:
+        st.rerun()
+        return
+
+    def _fila_cmp(label: str, antes: str, despues: str, cambiado: bool = False) -> str:
+        color_d = BRAND_RED if cambiado else BRAND_TEXT
+        return (
+            f"<tr>"
+            f"<td style='padding:7px 10px;color:{BRAND_MUTED};font-size:.85rem;"
+            f"border-bottom:1px solid #eef0f6;white-space:nowrap;'>{label}</td>"
+            f"<td style='padding:7px 10px;border-bottom:1px solid #eef0f6;'>{antes}</td>"
+            f"<td style='padding:7px 10px;border-bottom:1px solid #eef0f6;"
+            f"font-weight:600;color:{color_d};'>{despues}</td>"
+            f"</tr>"
+        )
+
+    ts_ent_orig = payload["ts_ent_orig"]
+    ts_sal_orig = payload["ts_sal_orig"]
+    ts_ent_nueva = payload["ts_ent_nueva"]
+    ts_sal_nueva = payload["ts_sal_nueva"]
+    h_orig = payload["horas_orig"]
+    h_nueva = payload["horas_nuevas"]
+
+    def _ts_str(ts):
+        return ts.strftime("%d/%m/%Y  %H:%M") if ts else "—"
+
+    def _cambiado(orig, nueva):
+        if orig is None:
+            return True
+        return orig.replace(second=0, microsecond=0) != nueva.replace(second=0, microsecond=0)
+
+    filas = (
+        _fila_cmp("Funcionario", payload["nombre"], payload["nombre"])
+        + _fila_cmp("Entrada", _ts_str(ts_ent_orig), _ts_str(ts_ent_nueva), _cambiado(ts_ent_orig, ts_ent_nueva))
+        + _fila_cmp("Salida", _ts_str(ts_sal_orig), _ts_str(ts_sal_nueva), _cambiado(ts_sal_orig, ts_sal_nueva))
+        + _fila_cmp(
+            "Horas trabajadas",
+            _dec_a_hhmm(h_orig),
+            _dec_a_hhmm(h_nueva),
+            abs(h_nueva - h_orig) > 0.01,
+        )
+    )
+
+    st.markdown(
+        f"<div style='background:{BRAND_BG_SOFT};border-radius:10px;padding:8px 4px;margin-bottom:12px;overflow:auto;'>"
+        f"<table style='width:100%;border-collapse:collapse;'>"
+        f"<thead><tr>"
+        f"<th style='padding:6px 10px;text-align:left;color:{BRAND_MUTED};font-size:.78rem;"
+        f"border-bottom:2px solid #d0d5e8;'>Campo</th>"
+        f"<th style='padding:6px 10px;text-align:left;color:{BRAND_MUTED};font-size:.78rem;"
+        f"border-bottom:2px solid #d0d5e8;'>Antes</th>"
+        f"<th style='padding:6px 10px;text-align:left;color:{BRAND_MUTED};font-size:.78rem;"
+        f"border-bottom:2px solid #d0d5e8;'>Después</th>"
+        f"</tr></thead>"
+        f"<tbody>{filas}</tbody>"
+        f"</table></div>",
+        unsafe_allow_html=True,
+    )
+
+    obs_nueva = payload["obs_nueva"]
+    obs_orig = payload["obs_orig"]
+    if obs_nueva or obs_orig:
+        st.divider()
+        if obs_nueva:
+            st.markdown(f"**Observación del admin:** {obs_nueva}")
+        if obs_orig:
+            st.caption(f"Observación original preservada: {obs_orig}")
+
+    bc, bx = st.columns(2)
+    with bc:
+        if st.button("Confirmar corrección", type="primary", use_container_width=True, key="edit_dlg_confirm"):
+            ahora = now_ecuador()
+            admin_tag = f"[Corrección {ahora.strftime('%Y-%m-%d')} por {payload['admin_user']}]"
+            obs_final = f"{admin_tag}: {obs_nueva}" if obs_nueva else admin_tag
+            if obs_orig:
+                obs_final += f" | [Orig]: {obs_orig}"
+
+            h = payload["horas_nuevas"]
+            cambios = {
+                "Timestamp Entrada": ts_ent_nueva.strftime(TS_FMT),
+                "Timestamp Salida": ts_sal_nueva.strftime(TS_FMT),
+                "Horas Trabajadas": h,
+                "Horas Efectivas": calcular_horas_efectivas(h),
+                "Horas Extra": calcular_horas_extra(h),
+                "Observaciones": obs_final,
+            }
+            ok = actualizar_por_entrada(payload["nombre"], payload["ts_entrada_str_orig"], cambios)
+            if ok:
+                st.session_state["_edit_pendiente"] = None
+                st.session_state["_edit_rev"] = st.session_state.get("_edit_rev", 0) + 1
+                st.toast(f"Turno corregido · {_dec_a_hhmm(h)}", icon="✅")
+                st.rerun()
+            else:
+                st.error("No se encontró el turno en la hoja. Puede haber sido modificado. Recarga la página.")
+    with bx:
+        if st.button("Cancelar", use_container_width=True, key="edit_dlg_cancel"):
+            st.session_state["_edit_pendiente"] = None
+            st.rerun()
+
+
+def _render_editar_turnos(df: pd.DataFrame) -> None:
+    admin_user = st.session_state.get("admin_user", "")
+    areas_admin = AREAS_POR_ADMIN.get(admin_user)
+    rev = st.session_state.get("_edit_rev", 0)
+
+    todas_areas = sorted(AREAS) if areas_admin is None else sorted(areas_admin)
+
+    c1, c2 = st.columns([2, 3])
+    with c1:
+        area_sel = st.selectbox(
+            "Área",
+            [None] + todas_areas,
+            format_func=lambda x: "— Selecciona un área —" if x is None else x,
+            key=f"edit_area_{rev}",
+        )
+    with c2:
+        lista_emp = [None] + sorted(EMPLEADOS_POR_AREA.get(area_sel, [])) if area_sel else [None]
+        emp_sel = st.selectbox(
+            "Empleado",
+            lista_emp,
+            format_func=lambda x: "— Selecciona un empleado —" if x is None else x,
+            key=f"edit_emp_{rev}",
+        )
+
+    if area_sel is None or emp_sel is None:
+        st.info("Selecciona un área y un empleado para ver sus turnos cerrados.")
+        return
+
+    cerrados = df[(df["Estado"] == "Completo") & (df["Nombre"] == emp_sel)].copy().reset_index(drop=True)
+
+    if cerrados.empty:
+        st.info(f"No hay turnos cerrados para **{emp_sel}** en el período filtrado.")
+        return
+
+    st.markdown(f"**{len(cerrados)} turno(s) cerrado(s) para {emp_sel}** — haz clic en una fila para seleccionarla.")
+
+    cols_disp = ["Fecha de Turno", "Timestamp Entrada", "Timestamp Salida",
+                 "Horas Trabajadas", "Horas Efectivas", "Horas Extra", "Observaciones"]
+    cerrados_disp = cerrados[cols_disp].copy()
+    for col in ["Horas Trabajadas", "Horas Efectivas", "Horas Extra"]:
+        cerrados_disp[col] = cerrados_disp[col].apply(_dec_a_hhmm)
+
+    event = st.dataframe(
+        cerrados_disp,
+        use_container_width=True,
+        hide_index=False,
+        on_select="rerun",
+        selection_mode="single-row",
+        key=f"edit_tabla_{rev}",
+    )
+
+    sel_rows = event.selection.rows
+    if not sel_rows:
+        return
+
+    turno = cerrados.iloc[sel_rows[0]]
+    ts_entrada_str_orig = str(turno["Timestamp Entrada"])
+
+    def _parse(raw: str):
+        ts = pd.to_datetime(raw, errors="coerce")
+        if pd.isna(ts):
+            ts = pd.to_datetime(raw, errors="coerce", dayfirst=True)
+        return ts.to_pydatetime() if not pd.isna(ts) else None
+
+    ts_ent_orig = _parse(ts_entrada_str_orig)
+    ts_sal_orig = _parse(str(turno["Timestamp Salida"]))
+    obs_orig = str(turno.get("Observaciones", "") or "").strip()
+    if obs_orig.lower() == "nan":
+        obs_orig = ""
+
+    try:
+        h_orig = float(turno["Horas Trabajadas"])
+    except (ValueError, TypeError):
+        h_orig = 0.0
+
+    st.divider()
+    _section_title("✏️ Corregir turno seleccionado")
+
+    c1, c2 = st.columns(2)
+    with c1:
+        st.markdown(f"<span style='color:{BRAND_MUTED};font-size:.9rem;font-weight:600;'>Entrada</span>",
+                    unsafe_allow_html=True)
+        f_ent = st.date_input("Fecha entrada",
+                               value=ts_ent_orig.date() if ts_ent_orig else None,
+                               key=f"edit_f_ent_{rev}", label_visibility="collapsed")
+        h_ent = _time_input("Hora entrada",
+                             ts_ent_orig.time() if ts_ent_orig else time(0, 0),
+                             f"edit_h_ent_{rev}")
+    with c2:
+        st.markdown(f"<span style='color:{BRAND_MUTED};font-size:.9rem;font-weight:600;'>Salida</span>",
+                    unsafe_allow_html=True)
+        f_sal = st.date_input("Fecha salida",
+                               value=ts_sal_orig.date() if ts_sal_orig else None,
+                               key=f"edit_f_sal_{rev}", label_visibility="collapsed")
+        h_sal = _time_input("Hora salida",
+                             ts_sal_orig.time() if ts_sal_orig else time(0, 0),
+                             f"edit_h_sal_{rev}")
+
+    obs_nueva = st.text_area(
+        "Motivo de la corrección (observación del administrador)",
+        key=f"edit_obs_{rev}",
+        placeholder="Ej: Horario corregido por discrepancia confirmada con el supervisor...",
+    )
+
+    if st.button("🔍 Revisar cambios", type="primary", use_container_width=True, key=f"edit_btn_{rev}"):
+        if f_ent is None or f_sal is None:
+            st.error("Completa ambas fechas.")
+        else:
+            ts_ent_nueva = datetime.combine(f_ent, h_ent)
+            ts_sal_nueva = datetime.combine(f_sal, h_sal)
+            if ts_sal_nueva <= ts_ent_nueva:
+                st.error("La salida debe ser posterior a la entrada.")
+            else:
+                horas_nuevas = calcular_horas(ts_ent_nueva, ts_sal_nueva)
+                st.session_state["_edit_pendiente"] = {
+                    "nombre": emp_sel,
+                    "ts_entrada_str_orig": ts_entrada_str_orig,
+                    "ts_ent_orig": ts_ent_orig,
+                    "ts_sal_orig": ts_sal_orig,
+                    "horas_orig": h_orig,
+                    "obs_orig": obs_orig,
+                    "ts_ent_nueva": ts_ent_nueva,
+                    "ts_sal_nueva": ts_sal_nueva,
+                    "horas_nuevas": horas_nuevas,
+                    "obs_nueva": obs_nueva.strip(),
+                    "admin_user": admin_user,
+                }
+
+    if st.session_state.get("_edit_pendiente"):
+        _dialogo_confirmar_edicion()
+
+
 def _es_solo_lectura(admin_user: str) -> bool:
     """Devuelve True si el usuario tiene solo_lectura = true en secrets."""
     try:
@@ -1461,11 +1746,12 @@ def vista_super_admin() -> None:
         with tab_tabla:
             _render_tabla(df_filt)
     else:
-        tab_dash, tab_comp, tab_tabla, tab_corr = st.tabs([
+        tab_dash, tab_comp, tab_tabla, tab_corr, tab_edit = st.tabs([
             "📊 Dashboard",
             "📈 Comparativo horas esperadas",
             "📋 Tabla",
             "🛠️ Correcciones",
+            "✏️ Editar turnos",
         ])
         with tab_dash:
             _render_dashboard(df_filt)
@@ -1475,3 +1761,5 @@ def vista_super_admin() -> None:
             _render_tabla(df_filt)
         with tab_corr:
             _render_correcciones(areas_permitidas=areas_permitidas)
+        with tab_edit:
+            _render_editar_turnos(df_filt)
