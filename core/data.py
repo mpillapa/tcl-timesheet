@@ -117,6 +117,7 @@ def _aplicar_formato_fecha_hora() -> None:
     _datetime_format_applied = True
 
 
+@st.cache_data(ttl=300)
 def leer_registros() -> pd.DataFrame:
     """Lee la hoja forzando 'object' en columnas de texto (evita TypeError al
     escribir strings en columnas float) y normalizando espacios en los
@@ -197,6 +198,73 @@ def append_registro(fila: dict) -> None:
         ws.insert_row(row_values, index=insert_idx, value_input_option="USER_ENTERED")
     else:
         ws.append_row(row_values, value_input_option="USER_ENTERED", table_range="A1")
+    leer_registros.clear()
+
+
+def append_registros_batch(filas: list) -> int:
+    """Inserta varias filas manteniendo el orden cronológico de la hoja, cada
+    una en su posición correcta (no como bloque contiguo).
+
+    Pensado para cargas masivas administrativas (p. ej. un rango de vacaciones).
+    Para cada fila se calcula —sobre la hoja original— la primera fila existente
+    con Timestamp Entrada mayor:
+      - las que no tienen ninguna posterior (caso típico: vacaciones futuras) se
+        agregan TODAS juntas al final en una sola llamada (append_rows);
+      - las que sí deben intercalarse se insertan una a una con insert_row, en
+        orden descendente de índice para que los índices menores no se invaliden
+        y los empates queden cronológicos.
+    Así el caso normal cuesta 1 llamada y solo los rangos retroactivos/intercalados
+    pagan inserciones extra. Devuelve el número de filas insertadas."""
+    if not filas:
+        return 0
+    ws = _get_worksheet()
+    _aplicar_formato_fecha_hora()
+    all_values = ws.get_all_values()
+    header = all_values[0] if all_values else _get_header()
+
+    try:
+        i_entrada = header.index("Timestamp Entrada")
+    except ValueError:
+        i_entrada = None
+
+    # ts de cada fila existente, en orden de hoja (índice 1-based; fila 1 = header)
+    existentes = []
+    for row_idx, row in enumerate(all_values[1:], start=2):
+        ts = _ts_key(row[i_entrada]) if (i_entrada is not None and i_entrada < len(row)) else ""
+        existentes.append((ts, row_idx))
+
+    def _pos_para(ts_nuevo):
+        """Primer índice de hoja cuyo ts existente es > ts_nuevo; None = va al final."""
+        if not ts_nuevo or i_entrada is None:
+            return None
+        for ts, row_idx in existentes:
+            if ts and ts > ts_nuevo:
+                return row_idx
+        return None
+
+    # plan: (insert_idx | None, ts_nuevo, row_values)
+    plan = []
+    for fila in filas:
+        ts_nuevo = _ts_key(fila.get("Timestamp Entrada", ""))
+        row_values = [fila.get(col, "") for col in header]
+        plan.append((_pos_para(ts_nuevo), ts_nuevo, row_values))
+
+    intercaladas = [p for p in plan if p[0] is not None]
+    al_final = [p for p in plan if p[0] is None]
+
+    # Insertar intercaladas de mayor a menor índice (y ts desc para empates).
+    intercaladas.sort(key=lambda p: (p[0], p[1]), reverse=True)
+    for insert_idx, _ts, row_values in intercaladas:
+        ws.insert_row(row_values, index=insert_idx, value_input_option="USER_ENTERED")
+
+    # Las que van al final, todas en una sola llamada y en orden cronológico.
+    if al_final:
+        al_final.sort(key=lambda p: p[1])
+        rows = [p[2] for p in al_final]
+        ws.append_rows(rows, value_input_option="USER_ENTERED", table_range="A1")
+
+    leer_registros.clear()
+    return len(plan)
 
 
 def _ts_key(raw) -> str:
@@ -263,6 +331,7 @@ def actualizar_por_entrada(nombre: str, ts_entrada_str: str, cambios: dict) -> b
         updates.append({"range": a1, "values": [[val if val is not None else ""]]})
     if updates:
         ws.batch_update(updates, value_input_option="USER_ENTERED")
+    leer_registros.clear()
     return True
 
 
@@ -286,6 +355,7 @@ _MESES_NUM = {
 }
 
 
+@st.cache_data(ttl=300)
 def leer_horas_esperadas() -> pd.DataFrame:
     """Lee la hoja 'Horas Esperadas' y devuelve un DataFrame con columnas
     Año (int), Mes (int 1-12), Horas (float). Solo incluye filas con Horas definidas."""

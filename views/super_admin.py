@@ -7,6 +7,7 @@ from core.data import (
     leer_registros,
     leer_horas_esperadas,
     append_registro,
+    append_registros_batch,
     actualizar_por_entrada,
     calcular_horas,
     calcular_horas_efectivas,
@@ -17,6 +18,7 @@ from core.employees import AREAS, EMPLEADOS_POR_AREA, AREA_DE
 from core.config import UMBRAL_HORAS_EXTRA, TS_FMT, MIN_JUSTIF_CHARS, HORAS_BASE_TURNO
 from core.marcado import guardar_salida
 from core.time_utils import now_ecuador, today_ecuador
+from core.ui_utils import bloquear_doble_click
 
 
 BRAND_NAVY = "#1E2D78"
@@ -772,11 +774,23 @@ def _render_dashboard(df: pd.DataFrame) -> None:
     st.altair_chart(chart_area, use_container_width=True)
 
 def _color_cumpl(val: float) -> str:
-    if val >= 95:
-        return "background-color: #d4edda; color: #155724"
-    if val >= 70:
-        return "background-color: #fff3cd; color: #856404"
-    return "background-color: #f8d7da; color: #721c24"
+    """Gradiente de rojo que se intensifica al acercarse y superar el 100%.
+
+    Cumplimiento bajo = fondo casi neutro; al aproximarse al 100% el rojo crece y
+    satura al máximo a partir de ~110% (sobrecarga / exceso de horas)."""
+    if pd.isna(val):
+        return ""
+    # t crece con el %, satura un poco más allá del 100% para que "sobrepasar"
+    # quede en el rojo más intenso.
+    t = max(0.0, min(float(val) / 110.0, 1.0))
+    r0, g0, b0 = 255, 255, 255          # blanco (cumplimiento lejano)
+    r1, g1, b1 = 0xD8, 0x20, 0x2F       # BRAND_RED (cumplimiento ≥110%)
+    r = round(r0 + (r1 - r0) * t)
+    g = round(g0 + (g1 - g0) * t)
+    b = round(b0 + (b1 - b0) * t)
+    lum = 0.299 * r + 0.587 * g + 0.114 * b
+    color_texto = "#FFFFFF" if lum < 140 else "#721c24"
+    return f"background-color: rgb({r},{g},{b}); color: {color_texto}; font-weight: 600"
 
 
 def _render_comparativo_horas(df: pd.DataFrame) -> None:
@@ -907,6 +921,17 @@ def _render_comparativo_horas(df: pd.DataFrame) -> None:
     emp_agg["% Cumplimiento"] = (
         emp_agg["Horas Efectivas"] / emp_agg["Horas Esperadas"].replace(0, pd.NA) * 100
     ).fillna(0).round(1)
+
+    # Turnos esperados = horas esperadas / 8 (horas efectivas por turno base)
+    emp_agg["Turnos Esperados"] = (emp_agg["Horas Esperadas"] / 8.0).round().astype(int)
+
+    # Cantidad de turnos = nº de turnos completos del funcionario en el rango
+    turnos_por_emp = (
+        comp_mes.groupby("Nombre").size().reset_index(name="Cantidad Turnos")
+    )
+    emp_agg = emp_agg.merge(turnos_por_emp, on="Nombre", how="left")
+    emp_agg["Cantidad Turnos"] = emp_agg["Cantidad Turnos"].fillna(0).astype(int)
+
     emp_agg = emp_agg.sort_values("Horas Efectivas", ascending=False)
 
     barras_emp = emp_agg.melt(
@@ -947,7 +972,10 @@ def _render_comparativo_horas(df: pd.DataFrame) -> None:
     )
     st.altair_chart(chart_emp, use_container_width=True)
 
-    tabla_emp = emp_agg[["Nombre", "Horas Efectivas", "Horas Esperadas", "% Cumplimiento"]].copy()
+    tabla_emp = emp_agg[[
+        "Nombre", "Horas Efectivas", "Horas Esperadas",
+        "Turnos Esperados", "Cantidad Turnos", "% Cumplimiento",
+    ]].copy()
     tabla_emp = tabla_emp.sort_values("% Cumplimiento")
     st.dataframe(
         tabla_emp.style
@@ -955,6 +983,8 @@ def _render_comparativo_horas(df: pd.DataFrame) -> None:
         .format({
             "Horas Efectivas": "{:.1f} h",
             "Horas Esperadas": "{:.1f} h",
+            "Turnos Esperados": "{:d}",
+            "Cantidad Turnos": "{:d}",
             "% Cumplimiento": "{:.1f}%",
         }),
         use_container_width=True,
@@ -1137,6 +1167,9 @@ def _dialogo_confirmar_correccion() -> None:
     bc, bx = st.columns(2)
     with bc:
         if st.button("Confirmar", type="primary", use_container_width=True, key="dlg_confirm"):
+            if bloquear_doble_click("corr_confirm"):
+                st.rerun()
+                return
             if modo == "cierre":
                 if not guardar_salida(
                     emp, payload["ts_entrada_str"], payload["ts_sal"],
@@ -1516,6 +1549,9 @@ def _dialogo_confirmar_edicion() -> None:
     bc, bx = st.columns(2)
     with bc:
         if st.button("Confirmar corrección", type="primary", use_container_width=True, key="edit_dlg_confirm"):
+            if bloquear_doble_click("edit_confirm"):
+                st.rerun()
+                return
             ahora = now_ecuador()
             admin_tag = f"[Corrección {ahora.strftime('%Y-%m-%d')} por {payload['admin_user']}]"
             obs_final = f"{admin_tag}: {obs_nueva}" if obs_nueva else admin_tag
@@ -1677,6 +1713,200 @@ def _render_editar_turnos(df: pd.DataFrame) -> None:
         _dialogo_confirmar_edicion()
 
 
+# ── Módulo de Vacaciones ────────────────────────────────────────────────────
+VAC_HORA_ENTRADA = time(8, 0)
+VAC_HORA_SALIDA = time(17, 0)
+VAC_OBSERVACION = "Vacaciones"
+
+_DIAS_ES = {0: "Lun", 1: "Mar", 2: "Mié", 3: "Jue", 4: "Vie", 5: "Sáb", 6: "Dom"}
+
+
+def _parse_fecha_simple(raw):
+    """Convierte un valor crudo de 'Fecha de Turno' a date (o None)."""
+    ts = pd.to_datetime(raw, errors="coerce")
+    if pd.isna(ts):
+        ts = pd.to_datetime(raw, errors="coerce", dayfirst=True)
+    return ts.date() if not pd.isna(ts) else None
+
+
+@st.dialog("Confirmar registro de vacaciones", width="large")
+def _dialogo_confirmar_vacaciones() -> None:
+    payload = st.session_state.get("_vac_pendiente")
+    if not payload:
+        st.rerun()
+        return
+
+    dias_nuevos = [date.fromisoformat(s) for s in payload["dias_nuevos"]]
+    dias_saltados = [date.fromisoformat(s) for s in payload["dias_saltados"]]
+    n = len(dias_nuevos)
+    h_ef_dia = calcular_horas_efectivas(9.0)
+    h_ef_total = n * h_ef_dia
+
+    def _fila(label: str, valor: str, color: str = BRAND_NAVY) -> str:
+        return (
+            f"<div style='display:flex;justify-content:space-between;align-items:center;"
+            f"padding:7px 0;border-bottom:1px solid #eef0f6;'>"
+            f"<span style='color:{BRAND_MUTED};font-size:.85rem;'>{label}</span>"
+            f"<span style='font-weight:600;color:{color};font-size:.95rem;'>{valor}</span>"
+            f"</div>"
+        )
+
+    f_ini = date.fromisoformat(payload["f_ini"])
+    f_fin = date.fromisoformat(payload["f_fin"])
+
+    st.markdown(
+        f"<div style='background:{BRAND_BG_SOFT};border-radius:10px;padding:4px 14px 8px;margin-bottom:12px;'>"
+        + _fila("Empleado", payload["emp"])
+        + _fila("Área", payload["area"])
+        + _fila("Rango solicitado", f"{f_ini.strftime('%d/%m/%Y')} → {f_fin.strftime('%d/%m/%Y')}")
+        + _fila("Turno por día", "08:00 → 17:00  ·  9 h (8 h efectivas, 1 h almuerzo)")
+        + _fila("Días a registrar", f"{n} día(s) laborable(s)", BRAND_RED)
+        + _fila("Total horas efectivas", f"{h_ef_total:.0f} h")
+        + "</div>",
+        unsafe_allow_html=True,
+    )
+
+    chips = "".join(
+        f"<span style='display:inline-block;background:#EBF0FF;color:{BRAND_NAVY};"
+        f"padding:3px 10px;border-radius:8px;margin:3px;font-size:.82rem;font-weight:600;'>"
+        f"{_DIAS_ES[d.weekday()]} {d.strftime('%d/%m')}</span>"
+        for d in dias_nuevos
+    )
+    st.markdown("**Días que se registrarán como vacaciones:**")
+    st.markdown(f"<div style='line-height:2;'>{chips}</div>", unsafe_allow_html=True)
+
+    if dias_saltados:
+        saltados_str = ", ".join(f"{_DIAS_ES[d.weekday()]} {d.strftime('%d/%m')}" for d in dias_saltados)
+        st.caption(f"⏭️ {len(dias_saltados)} día(s) se omiten porque ya tienen un turno registrado: {saltados_str}")
+
+    st.divider()
+    bc, bx = st.columns(2)
+    with bc:
+        if st.button("Confirmar vacaciones", type="primary", use_container_width=True, key="vac_dlg_confirm"):
+            if bloquear_doble_click("vac_confirm"):
+                st.rerun()
+                return
+            emp = payload["emp"]
+            area = payload["area"]
+            obs = f"{VAC_OBSERVACION} (registrado por {payload['admin_user']})"
+            filas = []
+            for d in dias_nuevos:
+                ts_in = datetime.combine(d, VAC_HORA_ENTRADA)
+                ts_out = datetime.combine(d, VAC_HORA_SALIDA)
+                horas = calcular_horas(ts_in, ts_out)
+                filas.append({
+                    "Nombre": emp,
+                    "Area": area,
+                    "Fecha de Turno": d.strftime("%Y-%m-%d"),
+                    "Timestamp Entrada": ts_in.strftime(TS_FMT),
+                    "Timestamp Salida": ts_out.strftime(TS_FMT),
+                    "Horas Trabajadas": horas,
+                    "Horas Efectivas": calcular_horas_efectivas(horas),
+                    "Horas Extra": calcular_horas_extra(horas),
+                    "Estado": "Completo",
+                    "Observaciones": obs,
+                })
+            n_ins = append_registros_batch(filas)
+            st.session_state["_vac_pendiente"] = None
+            st.session_state["_vac_rev"] = st.session_state.get("_vac_rev", 0) + 1
+            st.toast(f"{n_ins} día(s) de vacaciones registrados para {emp}", icon="🏖️")
+            st.rerun()
+    with bx:
+        if st.button("Cancelar", use_container_width=True, key="vac_dlg_cancel"):
+            st.session_state["_vac_pendiente"] = None
+            st.rerun()
+
+
+def _render_vacaciones() -> None:
+    admin_user = st.session_state.get("admin_user", "")
+    areas_admin = AREAS_POR_ADMIN.get(admin_user)
+    rev = st.session_state.get("_vac_rev", 0)
+
+    st.caption(
+        "Registra un rango de vacaciones para un empleado. Por cada día laborable (lunes a viernes) "
+        "se crea un turno de 08:00 a 17:00 — 9 h trabajadas, 8 h efectivas (1 h de almuerzo) — "
+        "con la observación 'Vacaciones'. Los días que ya tengan un turno registrado se omiten."
+    )
+
+    areas_vac = sorted(AREAS) if areas_admin is None else sorted(areas_admin)
+    if not areas_vac:
+        st.warning("No tienes áreas habilitadas para registrar vacaciones.")
+        return
+
+    c1, c2 = st.columns([2, 3])
+    with c1:
+        area_sel = st.selectbox(
+            "Área",
+            [None] + areas_vac,
+            format_func=lambda x: "— Selecciona un área —" if x is None else x,
+            key=f"vac_area_{rev}",
+        )
+    with c2:
+        lista_emp = [None] + sorted(EMPLEADOS_POR_AREA.get(area_sel, [])) if area_sel else [None]
+        emp_sel = st.selectbox(
+            "Empleado",
+            lista_emp,
+            format_func=lambda x: "— Selecciona un empleado —" if x is None else x,
+            key=f"vac_emp_{rev}",
+        )
+
+    if area_sel is None or emp_sel is None:
+        st.info("Selecciona un área y un empleado para registrar vacaciones.")
+        return
+
+    c3, c4 = st.columns(2)
+    with c3:
+        f_ini = st.date_input("Inicio de vacaciones", value=None, key=f"vac_ini_{rev}")
+    with c4:
+        f_fin = st.date_input("Fin de vacaciones", value=None, key=f"vac_fin_{rev}")
+
+    if st.button("🔍 Revisar vacaciones", type="primary", use_container_width=True, key=f"vac_btn_{rev}"):
+        if f_ini is None or f_fin is None:
+            st.error("Selecciona fecha de inicio y fin.")
+        elif f_fin < f_ini:
+            st.error("La fecha de fin debe ser igual o posterior a la de inicio.")
+        else:
+            dias_lv = []
+            d = f_ini
+            while d <= f_fin:
+                if d.weekday() < 5:  # 0-4 = lunes a viernes
+                    dias_lv.append(d)
+                d += timedelta(days=1)
+
+            if not dias_lv:
+                st.warning("El rango seleccionado no contiene días laborables (lunes a viernes).")
+            else:
+                df_act = leer_registros()
+                fechas_emp = set()
+                if not df_act.empty:
+                    emp_norm = str(emp_sel).strip()
+                    mask_emp = df_act["Nombre"].fillna("").astype(str).str.strip() == emp_norm
+                    for raw in df_act.loc[mask_emp, "Fecha de Turno"]:
+                        f = _parse_fecha_simple(raw)
+                        if f:
+                            fechas_emp.add(f)
+                dias_nuevos = [d for d in dias_lv if d not in fechas_emp]
+                dias_saltados = [d for d in dias_lv if d in fechas_emp]
+                if not dias_nuevos:
+                    st.warning(
+                        "Todos los días laborables del rango ya tienen un turno registrado "
+                        f"para {emp_sel}. No hay nada que agregar."
+                    )
+                else:
+                    st.session_state["_vac_pendiente"] = {
+                        "emp": emp_sel,
+                        "area": AREA_DE.get(emp_sel, ""),
+                        "f_ini": f_ini.isoformat(),
+                        "f_fin": f_fin.isoformat(),
+                        "dias_nuevos": [d.isoformat() for d in dias_nuevos],
+                        "dias_saltados": [d.isoformat() for d in dias_saltados],
+                        "admin_user": admin_user,
+                    }
+
+    if st.session_state.get("_vac_pendiente"):
+        _dialogo_confirmar_vacaciones()
+
+
 def _es_solo_lectura(admin_user: str) -> bool:
     """Devuelve True si el usuario tiene solo_lectura = true en secrets."""
     try:
@@ -1746,12 +1976,12 @@ def vista_super_admin() -> None:
         with tab_tabla:
             _render_tabla(df_filt)
     else:
-        tab_dash, tab_comp, tab_tabla, tab_corr, tab_edit = st.tabs([
+        tab_dash, tab_comp, tab_tabla, tab_gestion, tab_vac = st.tabs([
             "📊 Dashboard",
             "📈 Comparativo horas esperadas",
             "📋 Tabla",
-            "🛠️ Correcciones",
-            "✏️ Editar turnos",
+            "🛠️ Gestión de turnos",
+            "🏖️ Vacaciones",
         ])
         with tab_dash:
             _render_dashboard(df_filt)
@@ -1759,7 +1989,14 @@ def vista_super_admin() -> None:
             _render_comparativo_horas(df_filt)
         with tab_tabla:
             _render_tabla(df_filt)
-        with tab_corr:
-            _render_correcciones(areas_permitidas=areas_permitidas)
-        with tab_edit:
-            _render_editar_turnos(df_filt)
+        with tab_gestion:
+            sub_corr, sub_edit = st.tabs([
+                "🔧 Correcciones (turnos pendientes)",
+                "✏️ Editar turnos cerrados",
+            ])
+            with sub_corr:
+                _render_correcciones(areas_permitidas=areas_permitidas)
+            with sub_edit:
+                _render_editar_turnos(df_filt)
+        with tab_vac:
+            _render_vacaciones()

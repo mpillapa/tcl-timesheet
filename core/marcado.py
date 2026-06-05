@@ -18,6 +18,7 @@ from core.data import (
 )
 from core.employees import AREA_DE
 from core.time_utils import now_ecuador
+from core.ui_utils import bloquear_doble_click
 
 
 AUTO_LOGOUT_SECONDS = 3
@@ -147,6 +148,8 @@ def marcar_entrada(nombre: str) -> None:
 
 
 def marcar_salida(nombre: str) -> None:
+    if bloquear_doble_click(f"salida_{nombre}"):
+        return
     df = leer_registros()
     idx = buscar_turno_abierto_idx(df, nombre)
 
@@ -243,6 +246,9 @@ def render_formulario_justificacion() -> None:
                 f"La justificación debe tener al menos {MIN_JUSTIF_CHARS} caracteres. "
                 "Describe el motivo concreto del exceso."
             )
+            return
+        if bloquear_doble_click("confirmar_salida_justif"):
+            st.rerun()
             return
 
         ts_salida = datetime.strptime(pend["ts_salida_str"], TS_FMT)
