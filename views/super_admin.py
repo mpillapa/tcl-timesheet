@@ -26,6 +26,7 @@ BRAND_NAVY_MID = "#3A4BA0"
 BRAND_NAVY_SOFT = "#8A96C9"
 BRAND_RED = "#D8202F"
 BRAND_RED_SOFT = "#F5C4C8"
+BRAND_VAC = "#2F9E8F"  # turquesa para horas de vacaciones
 BRAND_BG_SOFT = "#F4F6FC"
 BRAND_TEXT = "#1B1F3B"
 BRAND_MUTED = "#6B7280"
@@ -673,33 +674,53 @@ def _render_dashboard(df: pd.DataFrame) -> None:
     st.altair_chart(chart_lineas, use_container_width=True)
 
     _section_title("📊 Progreso de horas por funcionario vs cuota del período")
-    st.caption("La barra azul crece con cada turno. Cuando supera la cuota del período, el exceso aparece en rojo.")
-
-    agg_emp = (
-        completos.groupby("Nombre", dropna=True)["Horas Efectivas"]
-        .sum()
-        .reset_index()
-        .rename(columns={"Horas Efectivas": "Total Efectivas"})
-        .sort_values("Total Efectivas", ascending=False)
-        .head(12)
+    st.caption(
+        "La barra crece con cada turno: trabajo efectivo en azul y vacaciones en turquesa. "
+        "Cuando el total supera la cuota del período, el exceso aparece en rojo."
     )
 
-    # cuota_periodo y df_esp ya calculados al inicio de la función
+    # Separar horas efectivas de trabajo real vs vacaciones por funcionario.
+    es_vac = (
+        completos["Observaciones"].fillna("").astype(str)
+        .str.strip().str.lower().str.startswith("vacaciones")
+    )
+    comp_tipo = completos.assign(_EsVac=es_vac)
+    piv = (
+        comp_tipo.groupby(["Nombre", "_EsVac"], dropna=True)["Horas Efectivas"]
+        .sum()
+        .unstack(fill_value=0.0)
+    )
+    piv = piv.rename(columns={False: "H_Trab", True: "H_Vac"})
+    for col in ("H_Trab", "H_Vac"):
+        if col not in piv.columns:
+            piv[col] = 0.0
+    agg_emp = piv.reset_index()
+    agg_emp["Total Efectivas"] = agg_emp["H_Trab"] + agg_emp["H_Vac"]
+    agg_emp = agg_emp.sort_values("Total Efectivas", ascending=False).head(12)
 
+    # cuota_periodo y df_esp ya calculados al inicio de la función.
+    # La cuota se llena primero con vacaciones y luego con trabajo; el excedente
+    # del total (sea del tipo que sea) se marca como "Sobre cuota".
     if cuota_periodo > 0:
-        agg_emp["Dentro de cuota"] = agg_emp["Total Efectivas"].clip(upper=cuota_periodo)
+        agg_emp["Vacaciones"] = agg_emp["H_Vac"].clip(upper=cuota_periodo)
+        agg_emp["Trabajo"] = agg_emp["H_Trab"].clip(
+            upper=(cuota_periodo - agg_emp["H_Vac"]).clip(lower=0)
+        )
         agg_emp["Sobre cuota"] = (agg_emp["Total Efectivas"] - cuota_periodo).clip(lower=0)
     else:
-        agg_emp["Dentro de cuota"] = agg_emp["Total Efectivas"]
+        agg_emp["Vacaciones"] = agg_emp["H_Vac"]
+        agg_emp["Trabajo"] = agg_emp["H_Trab"]
         agg_emp["Sobre cuota"] = 0.0
 
     orden_nombres = agg_emp["Nombre"].tolist()
     barras = agg_emp.melt(
         id_vars=["Nombre"],
-        value_vars=["Dentro de cuota", "Sobre cuota"],
+        value_vars=["Trabajo", "Vacaciones", "Sobre cuota"],
         var_name="Segmento",
         value_name="Horas",
     )
+    _orden_seg = {"Trabajo": 0, "Vacaciones": 1, "Sobre cuota": 2}
+    barras["_orden"] = barras["Segmento"].map(_orden_seg)
 
     chart_barras = (
         alt.Chart(barras)
@@ -716,12 +737,12 @@ def _render_dashboard(df: pd.DataFrame) -> None:
                 "Segmento:N",
                 title=None,
                 scale=alt.Scale(
-                    domain=["Dentro de cuota", "Sobre cuota"],
-                    range=[BRAND_NAVY, BRAND_RED],
+                    domain=["Trabajo", "Vacaciones", "Sobre cuota"],
+                    range=[BRAND_NAVY, BRAND_VAC, BRAND_RED],
                 ),
                 legend=alt.Legend(orient="top", symbolType="square"),
             ),
-            order=alt.Order("Segmento:N", sort="ascending"),
+            order=alt.Order("_orden:Q", sort="ascending"),
             tooltip=[
                 alt.Tooltip("Nombre:N", title="Funcionario"),
                 alt.Tooltip("Segmento:N", title="Tramo"),
