@@ -3,7 +3,6 @@
 from datetime import datetime
 import time
 
-import pandas as pd
 import streamlit as st
 
 from core.config import TS_FMT, UMBRAL_OLVIDO_H, UMBRAL_HORAS_EXTRA, MIN_JUSTIF_CHARS, MIN_MINUTOS_TURNO
@@ -17,7 +16,7 @@ from core.data import (
     buscar_turno_abierto_idx,
 )
 from core.employees import AREA_DE
-from core.time_utils import now_ecuador
+from core.time_utils import now_ecuador, parse_timestamp_flexible
 from core.ui_utils import bloquear_doble_click
 
 
@@ -46,16 +45,6 @@ def _crear_nueva_entrada(nombre: str, ahora: datetime) -> None:
         "Estado": "Abierto",
         "Observaciones": "",
     })
-
-
-def _parse_timestamp_flexible(raw_ts: str) -> datetime | None:
-    """Parsea timestamps desde varios formatos que puede devolver Sheets."""
-    ts = pd.to_datetime(raw_ts, errors="coerce")
-    if pd.isna(ts):
-        ts = pd.to_datetime(raw_ts, errors="coerce", dayfirst=True)
-    if pd.isna(ts):
-        return None
-    return ts.to_pydatetime()
 
 
 def programar_cierre_sesion() -> None:
@@ -97,7 +86,7 @@ def marcar_entrada(nombre: str) -> None:
 
     if idx_abierto is not None:
         ts_prev_str = str(df.loc[idx_abierto, "Timestamp Entrada"])
-        ts_prev = _parse_timestamp_flexible(ts_prev_str)
+        ts_prev = parse_timestamp_flexible(ts_prev_str)
         if ts_prev is None:
             st.error("No se pudo interpretar la hora de entrada del turno abierto. Contacta a tu supervisor.")
             return
@@ -175,7 +164,7 @@ def marcar_salida(nombre: str) -> None:
 
     ahora = now_ecuador()
     ts_entrada_str = str(df.loc[idx, "Timestamp Entrada"])
-    ts_entrada = _parse_timestamp_flexible(ts_entrada_str)
+    ts_entrada = parse_timestamp_flexible(ts_entrada_str)
     if ts_entrada is None:
         st.error("No se pudo interpretar la hora de entrada del turno. Contacta a tu supervisor.")
         return

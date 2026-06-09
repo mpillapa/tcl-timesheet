@@ -160,7 +160,6 @@ def leer_registros() -> pd.DataFrame:
             df.loc[mask_falta_extra, "Horas Extra"] = horas_num[mask_falta_extra].apply(calcular_horas_extra)
         return df
     except Exception as e:
-        import streamlit as st
         st.error(f"Error leyendo Google Sheets: {type(e).__name__}: {e}")
         return pd.DataFrame({c: pd.Series(dtype=object) for c in COLUMNAS})
 

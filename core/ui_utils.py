@@ -33,3 +33,27 @@ def bloquear_doble_click(token: str, ventana_seg: float = _VENTANA_DOBLE_CLICK) 
         return True
     st.session_state[clave] = ahora
     return False
+
+
+def set_flash(mensaje: str, icono: str = "✅") -> None:
+    """Guarda un mensaje de confirmación para mostrarlo tras el próximo rerun.
+
+    Útil cuando una acción escribe en la BD y luego hace st.rerun(): el toast
+    se pierde con el rerun, así que se difiere el mensaje y se muestra en el
+    siguiente render con mostrar_flash()."""
+    st.session_state["_flash_msg"] = {"mensaje": mensaje, "icono": icono}
+
+
+def mostrar_flash() -> None:
+    """Muestra y consume el mensaje flash pendiente, si lo hay.
+
+    Combina un banner persistente (visible hasta la próxima interacción) con un
+    toast flotante, para que la confirmación no pase desapercibida."""
+    flash = st.session_state.pop("_flash_msg", None)
+    if not flash:
+        return
+    st.success(flash["mensaje"], icon=flash["icono"])
+    try:
+        st.toast(flash["mensaje"], icon=flash["icono"])
+    except Exception:
+        pass

@@ -17,8 +17,8 @@ from core.data import (
 from core.employees import AREAS, EMPLEADOS_POR_AREA, AREA_DE
 from core.config import UMBRAL_HORAS_EXTRA, TS_FMT, MIN_JUSTIF_CHARS, HORAS_BASE_TURNO
 from core.marcado import guardar_salida
-from core.time_utils import now_ecuador, today_ecuador
-from core.ui_utils import bloquear_doble_click
+from core.time_utils import now_ecuador, today_ecuador, parse_timestamp_flexible, parse_fecha_flexible
+from core.ui_utils import bloquear_doble_click, set_flash, mostrar_flash
 
 
 BRAND_NAVY = "#1E2D78"
@@ -27,6 +27,7 @@ BRAND_NAVY_SOFT = "#8A96C9"
 BRAND_RED = "#D8202F"
 BRAND_RED_SOFT = "#F5C4C8"
 BRAND_VAC = "#2F9E8F"  # turquesa para horas de vacaciones
+BRAND_CUOTA = "#C77D00"  # ámbar/dorado para la línea de cuota (meta)
 BRAND_BG_SOFT = "#F4F6FC"
 BRAND_TEXT = "#1B1F3B"
 BRAND_MUTED = "#6B7280"
@@ -698,6 +699,20 @@ def _render_dashboard(df: pd.DataFrame) -> None:
     agg_emp["Total Efectivas"] = agg_emp["H_Trab"] + agg_emp["H_Vac"]
     agg_emp = agg_emp.sort_values("Total Efectivas", ascending=False).head(12)
 
+    # Conteo de turnos por funcionario: trabajados (no vacaciones) y días de vacaciones.
+    conteo = comp_tipo.groupby(["Nombre", "_EsVac"]).size().unstack(fill_value=0)
+    conteo = conteo.rename(columns={False: "Turnos Trabajados", True: "Dias Vacaciones"})
+    for col in ("Turnos Trabajados", "Dias Vacaciones"):
+        if col not in conteo.columns:
+            conteo[col] = 0
+    agg_emp = agg_emp.merge(
+        conteo[["Turnos Trabajados", "Dias Vacaciones"]].reset_index(),
+        on="Nombre", how="left",
+    )
+    agg_emp[["Turnos Trabajados", "Dias Vacaciones"]] = (
+        agg_emp[["Turnos Trabajados", "Dias Vacaciones"]].fillna(0).astype(int)
+    )
+
     # cuota_periodo y df_esp ya calculados al inicio de la función.
     # La cuota se llena primero con vacaciones y luego con trabajo; el excedente
     # del total (sea del tipo que sea) se marca como "Sobre cuota".
@@ -714,7 +729,7 @@ def _render_dashboard(df: pd.DataFrame) -> None:
 
     orden_nombres = agg_emp["Nombre"].tolist()
     barras = agg_emp.melt(
-        id_vars=["Nombre"],
+        id_vars=["Nombre", "Turnos Trabajados", "Dias Vacaciones"],
         value_vars=["Trabajo", "Vacaciones", "Sobre cuota"],
         var_name="Segmento",
         value_name="Horas",
@@ -747,70 +762,84 @@ def _render_dashboard(df: pd.DataFrame) -> None:
                 alt.Tooltip("Nombre:N", title="Funcionario"),
                 alt.Tooltip("Segmento:N", title="Tramo"),
                 alt.Tooltip("Horas:Q", title="Horas", format=".1f"),
+                alt.Tooltip("Turnos Trabajados:Q", title="Turnos trabajados", format="d"),
+                alt.Tooltip("Dias Vacaciones:Q", title="Días de vacaciones", format="d"),
             ],
         )
         .properties(height=360)
     )
+
+    # Etiqueta con el total de horas efectivas encima de cada barra.
+    texto_total = (
+        alt.Chart(agg_emp)
+        .mark_text(align="center", baseline="bottom", dy=-4, fontWeight="bold",
+                   fontSize=11, color=BRAND_TEXT)
+        .encode(
+            x=alt.X("Nombre:N", sort=orden_nombres),
+            y=alt.Y("Total Efectivas:Q"),
+            text=alt.Text("Total Efectivas:Q", format=".0f"),
+        )
+    )
+
+    capas = [chart_barras, texto_total]
 
     if cuota_periodo > 0:
         regla_cuota = (
             alt.Chart(pd.DataFrame({"cuota": [cuota_periodo]}))
-            .mark_rule(strokeDash=[5, 4], color="#888888", strokeWidth=1.5)
+            .mark_rule(strokeDash=[6, 3], color=BRAND_CUOTA, strokeWidth=2.5)
             .encode(y=alt.Y("cuota:Q", title=""))
         )
-        chart_final = chart_barras + regla_cuota
+        etiqueta_cuota = (
+            alt.Chart(pd.DataFrame({
+                "Nombre": [orden_nombres[0]],
+                "cuota": [cuota_periodo],
+                "label": [f"Cuota: {cuota_periodo:.0f} h"],
+            }))
+            .mark_text(align="left", baseline="bottom", dx=-24, dy=-4,
+                       fontWeight="bold", fontSize=12, color=BRAND_CUOTA)
+            .encode(
+                x=alt.X("Nombre:N", sort=orden_nombres),
+                y=alt.Y("cuota:Q"),
+                text="label:N",
+            )
+        )
+        capas += [regla_cuota, etiqueta_cuota]
+        chart_final = alt.layer(*capas).properties(height=360)
         st.altair_chart(chart_final, use_container_width=True)
-        st.caption(f"Línea punteada = cuota del período: **{cuota_periodo:.0f} h** por funcionario (hoja Horas Esperadas)")
     else:
-        st.altair_chart(chart_barras, use_container_width=True)
+        chart_final = alt.layer(*capas).properties(height=360)
+        st.altair_chart(chart_final, use_container_width=True)
         st.caption("Sin cuota definida en 'Horas Esperadas' para los meses del período filtrado.")
 
-    _section_title("🗂️ Distribución de horas por área")
-    por_area_dia = (
-        completos.groupby(["Fecha de Turno", "Area"], dropna=True)["Horas Trabajadas"]
-        .sum()
-        .reset_index()
-        .sort_values("Fecha de Turno")
-    )
-    chart_area = (
-        alt.Chart(por_area_dia)
-        .mark_area(opacity=0.78, interpolate="monotone", line={"strokeWidth": 1.5})
-        .encode(
-            x=alt.X("yearmonthdate(Fecha de Turno):T", title="Fecha", axis=alt.Axis(format="%d %b", labelAngle=0)),
-            y=alt.Y("Horas Trabajadas:Q", stack="zero", title="Horas"),
-            color=alt.Color(
-                "Area:N",
-                title="Área",
-                scale=alt.Scale(range=BRAND_CATEGORICAL),
-                legend=alt.Legend(orient="bottom", symbolType="square"),
-            ),
-            tooltip=[
-                alt.Tooltip("Fecha de Turno:T", title="Fecha", format="%d %b %Y"),
-                alt.Tooltip("Area:N", title="Área"),
-                alt.Tooltip("Horas Trabajadas:Q", title="Horas", format=".2f"),
-            ],
-        )
-        .properties(height=360)
-    )
-    st.altair_chart(chart_area, use_container_width=True)
 
 def _color_cumpl(val: float) -> str:
-    """Gradiente de rojo que se intensifica al acercarse y superar el 100%.
+    """Semáforo invertido para el % de cumplimiento.
 
-    Cumplimiento bajo = fondo casi neutro; al aproximarse al 100% el rojo crece y
-    satura al máximo a partir de ~110% (sobrecarga / exceso de horas)."""
+    0% = verde (lejos del tope), pasa por amarillo a la mitad y llega a rojo al
+    100%. Si SUPERA el 100% se usa un morado sólido distinto, para que "excedido"
+    se distinga de "cerca del límite"."""
     if pd.isna(val):
         return ""
-    # t crece con el %, satura un poco más allá del 100% para que "sobrepasar"
-    # quede en el rojo más intenso.
-    t = max(0.0, min(float(val) / 110.0, 1.0))
-    r0, g0, b0 = 255, 255, 255          # blanco (cumplimiento lejano)
-    r1, g1, b1 = 0xD8, 0x20, 0x2F       # BRAND_RED (cumplimiento ≥110%)
-    r = round(r0 + (r1 - r0) * t)
-    g = round(g0 + (g1 - g0) * t)
-    b = round(b0 + (b1 - b0) * t)
+    v = float(val)
+    if v > 100:
+        # Excedido: categoría aparte, color sólido fuera del gradiente.
+        return "background-color: #6A1B9A; color: #FFFFFF; font-weight: 700"
+
+    t = max(0.0, min(v / 100.0, 1.0))
+    verde = (31, 146, 84)     # #1F9254
+    amarillo = (224, 165, 0)  # #E0A500
+    rojo = (216, 32, 47)      # #D8202F (BRAND_RED)
+    if t <= 0.5:
+        u = t / 0.5
+        c0, c1 = verde, amarillo
+    else:
+        u = (t - 0.5) / 0.5
+        c0, c1 = amarillo, rojo
+    r = round(c0[0] + (c1[0] - c0[0]) * u)
+    g = round(c0[1] + (c1[1] - c0[1]) * u)
+    b = round(c0[2] + (c1[2] - c0[2]) * u)
     lum = 0.299 * r + 0.587 * g + 0.114 * b
-    color_texto = "#FFFFFF" if lum < 140 else "#721c24"
+    color_texto = "#FFFFFF" if lum < 140 else "#1B1F3B"
     return f"background-color: rgb({r},{g},{b}); color: {color_texto}; font-weight: 600"
 
 
@@ -902,9 +931,19 @@ def _render_comparativo_horas(df: pd.DataFrame) -> None:
                     alt.Tooltip("% Cumplimiento:Q", title="% Cumpl.", format=".1f"),
                 ],
             )
-            .properties(height=360)
         )
-        st.altair_chart(chart_comp, use_container_width=True)
+        texto_comp = (
+            alt.Chart(barras_comp)
+            .mark_text(baseline="bottom", dy=-4, fontSize=10, fontWeight="bold", color=BRAND_TEXT)
+            .encode(
+                x=alt.X("Periodo:N", sort=orden_periodos),
+                xOffset=alt.XOffset("Tipo:N"),
+                y=alt.Y("H:Q"),
+                text=alt.Text("H:Q", format=".0f"),
+                detail=alt.Detail("Tipo:N"),
+            )
+        )
+        st.altair_chart((chart_comp + texto_comp).properties(height=360), use_container_width=True)
 
         max_chips = 6
         resumen_cols = st.columns(min(len(comp_chart_visible), max_chips))
@@ -989,9 +1028,19 @@ def _render_comparativo_horas(df: pd.DataFrame) -> None:
                 alt.Tooltip("% Cumplimiento:Q", title="% Cumpl.", format=".1f"),
             ],
         )
-        .properties(height=360)
     )
-    st.altair_chart(chart_emp, use_container_width=True)
+    texto_emp = (
+        alt.Chart(barras_emp)
+        .mark_text(baseline="bottom", dy=-4, fontSize=9, fontWeight="bold", color=BRAND_TEXT)
+        .encode(
+            x=alt.X("Nombre:N", sort=emp_agg["Nombre"].tolist()),
+            xOffset=alt.XOffset("Tipo:N"),
+            y=alt.Y("H:Q"),
+            text=alt.Text("H:Q", format=".0f"),
+            detail=alt.Detail("Tipo:N"),
+        )
+    )
+    st.altair_chart((chart_emp + texto_emp).properties(height=360), use_container_width=True)
 
     tabla_emp = emp_agg[[
         "Nombre", "Horas Efectivas", "Horas Esperadas",
@@ -1198,7 +1247,7 @@ def _dialogo_confirmar_correccion() -> None:
                 ):
                     st.error("El turno ya no existe. Recarga la página.")
                     return
-                st.toast(f"Turno cerrado · {payload['horas']:.2f} h", icon="✅")
+                flash_msg = f"Turno cerrado para {emp} · {payload['horas']:.2f} h trabajadas"
             elif modo == "entrada":
                 ts_in = payload["ts_in"]
                 append_registro({
@@ -1213,7 +1262,7 @@ def _dialogo_confirmar_correccion() -> None:
                     "Estado": "Abierto",
                     "Observaciones": "Registro manual: entrada registrada por administrador",
                 })
-                st.toast(f"Entrada registrada · {ts_in.strftime('%H:%M')}", icon="✅")
+                flash_msg = f"Entrada manual registrada para {emp} · {ts_in.strftime('%d/%m %H:%M')}"
             else:
                 ts_in, ts_out = payload["ts_in"], payload["ts_out"]
                 horas = payload["horas"]
@@ -1229,7 +1278,8 @@ def _dialogo_confirmar_correccion() -> None:
                     "Estado": "Completo",
                     "Observaciones": f"Registro manual: {payload['obs']}",
                 })
-                st.toast(f"Registro creado · {horas:.2f} h", icon="✅")
+                flash_msg = f"Registro histórico creado para {emp} · {horas:.2f} h trabajadas"
+            set_flash(flash_msg)
             st.session_state["_corr_pendiente"] = None
             st.session_state["_corr_rev"] = st.session_state.get("_corr_rev", 0) + 1
             st.rerun()
@@ -1590,9 +1640,9 @@ def _dialogo_confirmar_edicion() -> None:
             }
             ok = actualizar_por_entrada(payload["nombre"], payload["ts_entrada_str_orig"], cambios)
             if ok:
+                set_flash(f"Turno de {payload['nombre']} corregido · {_dec_a_hhmm(h)} trabajadas")
                 st.session_state["_edit_pendiente"] = None
                 st.session_state["_edit_rev"] = st.session_state.get("_edit_rev", 0) + 1
-                st.toast(f"Turno corregido · {_dec_a_hhmm(h)}", icon="✅")
                 st.rerun()
             else:
                 st.error("No se encontró el turno en la hoja. Puede haber sido modificado. Recarga la página.")
@@ -1660,14 +1710,8 @@ def _render_editar_turnos(df: pd.DataFrame) -> None:
     turno = cerrados.iloc[sel_rows[0]]
     ts_entrada_str_orig = str(turno["Timestamp Entrada"])
 
-    def _parse(raw: str):
-        ts = pd.to_datetime(raw, errors="coerce")
-        if pd.isna(ts):
-            ts = pd.to_datetime(raw, errors="coerce", dayfirst=True)
-        return ts.to_pydatetime() if not pd.isna(ts) else None
-
-    ts_ent_orig = _parse(ts_entrada_str_orig)
-    ts_sal_orig = _parse(str(turno["Timestamp Salida"]))
+    ts_ent_orig = parse_timestamp_flexible(ts_entrada_str_orig)
+    ts_sal_orig = parse_timestamp_flexible(str(turno["Timestamp Salida"]))
     obs_orig = str(turno.get("Observaciones", "") or "").strip()
     if obs_orig.lower() == "nan":
         obs_orig = ""
@@ -1740,14 +1784,6 @@ VAC_HORA_SALIDA = time(17, 0)
 VAC_OBSERVACION = "Vacaciones"
 
 _DIAS_ES = {0: "Lun", 1: "Mar", 2: "Mié", 3: "Jue", 4: "Vie", 5: "Sáb", 6: "Dom"}
-
-
-def _parse_fecha_simple(raw):
-    """Convierte un valor crudo de 'Fecha de Turno' a date (o None)."""
-    ts = pd.to_datetime(raw, errors="coerce")
-    if pd.isna(ts):
-        ts = pd.to_datetime(raw, errors="coerce", dayfirst=True)
-    return ts.date() if not pd.isna(ts) else None
 
 
 @st.dialog("Confirmar registro de vacaciones", width="large")
@@ -1828,9 +1864,9 @@ def _dialogo_confirmar_vacaciones() -> None:
                     "Observaciones": obs,
                 })
             n_ins = append_registros_batch(filas)
+            set_flash(f"{n_ins} día(s) de vacaciones registrados para {emp}", icono="🏖️")
             st.session_state["_vac_pendiente"] = None
             st.session_state["_vac_rev"] = st.session_state.get("_vac_rev", 0) + 1
-            st.toast(f"{n_ins} día(s) de vacaciones registrados para {emp}", icon="🏖️")
             st.rerun()
     with bx:
         if st.button("Cancelar", use_container_width=True, key="vac_dlg_cancel"):
@@ -1903,7 +1939,7 @@ def _render_vacaciones() -> None:
                     emp_norm = str(emp_sel).strip()
                     mask_emp = df_act["Nombre"].fillna("").astype(str).str.strip() == emp_norm
                     for raw in df_act.loc[mask_emp, "Fecha de Turno"]:
-                        f = _parse_fecha_simple(raw)
+                        f = parse_fecha_flexible(raw)
                         if f:
                             fechas_emp.add(f)
                 dias_nuevos = [d for d in dias_lv if d not in fechas_emp]
@@ -1971,6 +2007,8 @@ def vista_super_admin() -> None:
             st.rerun()
 
     st.markdown("<div style='height:14px;'></div>", unsafe_allow_html=True)
+
+    mostrar_flash()
 
     df_raw = leer_registros()
     df_scope = _aplicar_scope_admin(df_raw, admin_user)
