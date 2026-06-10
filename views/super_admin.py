@@ -9,6 +9,7 @@ from core.data import (
     append_registro,
     append_registros_batch,
     actualizar_por_entrada,
+    eliminar_por_entrada,
     calcular_horas,
     calcular_horas_efectivas,
     calcular_horas_extra,
@@ -42,6 +43,35 @@ BRAND_CATEGORICAL = [
     "#7A5CA6",
     "#4B5B8F",
 ]
+
+BRAND_EVENTO = "#7A5CA6"  # morado para faltas/permisos en el gráfico
+
+# Tipos de eventualidad y motivos (compartidos por el módulo y la clasificación).
+EVENTO_FALTA = "Justificación de falta"
+EVENTO_PERMISO = "Solicitud de permiso"
+EVENTO_VACACIONES = "Vacaciones"
+TIPOS_EVENTO = [EVENTO_FALTA, EVENTO_PERMISO, EVENTO_VACACIONES]
+
+SUBCATEGORIAS_EVENTO = [
+    "Capacitación",
+    "Comisión",
+    "Salud",
+    "Calamidad Doméstica",
+    "Permiso Personal",
+    "Maternidad",
+    "Atención fuera de oficina",
+]
+
+
+def _clasificar_obs(obs) -> str:
+    """Clasifica un turno por su observación: 'vacaciones', 'evento'
+    (falta/permiso) o 'trabajo' (turno normal)."""
+    o = str(obs or "").strip().lower()
+    if o.startswith(EVENTO_VACACIONES.lower()):
+        return "vacaciones"
+    if o.startswith(EVENTO_FALTA.lower()) or o.startswith(EVENTO_PERMISO.lower()):
+        return "evento"
+    return "trabajo"
 
 
 def _inject_brand_css() -> None:
@@ -226,9 +256,13 @@ def _kpi_card(icon: str, icon_bg: str, icon_color: str, label: str,
     accent_cls = " accent" if accent else ""
     unit_html = f'<span class="unit">{unit}</span>' if unit else ""
     sub_html = f'<div class="kpi-sub">{sub}</div>' if sub else ""
+    icon_html = (
+        f'<div class="kpi-icon" style="background:{icon_bg};color:{icon_color};">{icon}</div>'
+        if icon else ""
+    )
     return (
         f'<div class="kpi-card{accent_cls}">'
-        f'<div class="kpi-icon" style="background:{icon_bg};color:{icon_color};">{icon}</div>'
+        f'{icon_html}'
         f'<div class="kpi-body">'
         f'<div class="kpi-label">{label}</div>'
         f'<div class="kpi-value">{value}{unit_html}</div>'
@@ -409,29 +443,29 @@ def _build_filter_chips_html(
     chips = []
 
     if semana_key and semana_key != _SEM_TODAS:
-        chips.append(f'<span class="fchip fchip-date">🗓️ {semana_key.strip()}</span>')
+        chips.append(f'<span class="fchip fchip-date">{semana_key.strip()}</span>')
     elif mes_key and mes_key != _MES_TODOS:
-        chips.append(f'<span class="fchip fchip-date">📆 {mes_key}</span>')
+        chips.append(f'<span class="fchip fchip-date">{mes_key}</span>')
     elif isinstance(rango, tuple) and len(rango) == 2 and (rango[0] != fmin or rango[1] != fmax):
         chips.append(
-            f'<span class="fchip fchip-date">📅 {rango[0].strftime("%d/%m/%y")} – {rango[1].strftime("%d/%m/%y")}</span>'
+            f'<span class="fchip fchip-date">{rango[0].strftime("%d/%m/%y")} – {rango[1].strftime("%d/%m/%y")}</span>'
         )
     if bool(areas_sel) and set(areas_sel) != set(areas_disponibles):
         for a in areas_sel:
-            chips.append(f'<span class="fchip fchip-area">🏢 {a}</span>')
+            chips.append(f'<span class="fchip fchip-area">{a}</span>')
     if bool(emp_sel) and set(emp_sel) != set(empleados_disp):
         shown = emp_sel[:4]
         rest = len(emp_sel) - len(shown)
         for e in shown:
-            chips.append(f'<span class="fchip fchip-emp">👤 {e}</span>')
+            chips.append(f'<span class="fchip fchip-emp">{e}</span>')
         if rest > 0:
             chips.append(f'<span class="fchip fchip-emp">+{rest} más</span>')
     if bool(est_sel) and set(est_sel) != set(estados):
         for s in est_sel:
-            chips.append(f'<span class="fchip fchip-est">📊 {s}</span>')
+            chips.append(f'<span class="fchip fchip-est">{s}</span>')
 
     count_html = (
-        f'<span class="fchip fchip-none">📋 {filtrados} / {total} registros</span>'
+        f'<span class="fchip fchip-none">{filtrados} / {total} registros</span>'
     )
 
     if not chips:
@@ -477,23 +511,23 @@ def _filtros_inline(df: pd.DataFrame, areas_permitidas=None) -> pd.DataFrame:
     # Botones de control
     c_pop, c_reset = st.columns([1.5, 1])
     with c_pop:
-        with st.popover("⚙️ Editar filtros", use_container_width=True):
-            st.selectbox("📆 Mes", opciones_mes, key="filtro_mes")
-            st.selectbox("🗓️ Semana ISO", opciones_sem, key="filtro_semana_iso")
+        with st.popover("Editar filtros", use_container_width=True):
+            st.selectbox("Mes", opciones_mes, key="filtro_mes")
+            st.selectbox("Semana ISO", opciones_sem, key="filtro_semana_iso")
             st.date_input(
-                "📅 Rango de fechas",
+                "Rango de fechas",
                 value=(fmin, fmax),
                 min_value=fmin,
                 max_value=fmax,
                 key="filtro_rango",
                 on_change=_clear_quick_filters,
             )
-            st.multiselect("🏢 Área",     areas_disponibles, default=areas_disponibles, key="filtro_area")
-            st.multiselect("👤 Empleado", empleados_disp,    default=empleados_disp,    key="filtro_emp")
-            st.multiselect("📊 Estado",   estados,           default=estados,           key="filtro_est")
+            st.multiselect("Área",     areas_disponibles, default=areas_disponibles, key="filtro_area")
+            st.multiselect("Empleado", empleados_disp,    default=empleados_disp,    key="filtro_emp")
+            st.multiselect("Estado",   estados,           default=estados,           key="filtro_est")
 
     with c_reset:
-        if st.button("↺ Restablecer filtros", use_container_width=True):
+        if st.button("Restablecer filtros", use_container_width=True):
             for k in ("filtro_mes", "filtro_semana_iso", "filtro_rango", "filtro_area", "filtro_emp", "filtro_est"):
                 st.session_state.pop(k, None)
             st.rerun()
@@ -587,32 +621,32 @@ def _render_dashboard(df: pd.DataFrame) -> None:
     cards_html = (
         '<div class="kpi-grid">'
         + _kpi_card(
-            "⏱️", "#E6E9F4", BRAND_NAVY,
+            "", "#E6E9F4", BRAND_NAVY,
             "Total horas", f"{total_horas:,.1f}", "h",
             f"Prom. <b>{promedio_turno:.2f}</b> h/turno",
         )
         + _kpi_card(
-            "👥", "#E6E9F4", BRAND_NAVY,
+            "", "#E6E9F4", BRAND_NAVY,
             "Funcionarios", f"{funcionarios_activos}", "",
             "con al menos un turno completo",
         )
         + _kpi_card(
-            "✅", "#E1F3E7", "#1F9254",
+            "", "#E1F3E7", "#1F9254",
             "Turnos completos", f"{len(completos):,}", "",
             "con entrada y salida",
         )
         + _kpi_card(
-            "🟠", "#FEF3E2", "#C97A0A",
+            "", "#FEF3E2", "#C97A0A",
             "Turnos abiertos", f"{len(abiertos):,}", "",
             "pendientes de cerrar salida",
         )
         + _kpi_card(
-            "📝", "#FDE7E9", BRAND_RED,
+            "", "#FDE7E9", BRAND_RED,
             "En revisión", f"{len(revision):,}", "",
             "turnos >18h enviados a super admin",
         )
         + _kpi_card(
-            "🔥", "#FDE7E9", BRAND_RED,
+            "", "#FDE7E9", BRAND_RED,
             kpi_extra_label,
             f"{max(0, horas_sobre_cuota):,.1f}", "h",
             kpi_extra_sub,
@@ -628,7 +662,7 @@ def _render_dashboard(df: pd.DataFrame) -> None:
         st.caption("Sin turnos completos en el filtro.")
         return
 
-    _section_title("📈 Tendencia diaria por funcionario")
+    _section_title("Tendencia diaria por funcionario")
     st.caption("Se muestran los funcionarios con más horas en el período filtrado para facilitar la lectura.")
 
     top_n = st.slider("Funcionarios en el gráfico", min_value=3, max_value=20, value=8, step=1, key="top_n_func")
@@ -674,67 +708,68 @@ def _render_dashboard(df: pd.DataFrame) -> None:
     )
     st.altair_chart(chart_lineas, use_container_width=True)
 
-    _section_title("📊 Progreso de horas por funcionario vs cuota del período")
+    _section_title("Progreso de horas por funcionario vs cuota del período")
     st.caption(
-        "La barra crece con cada turno: trabajo efectivo en azul y vacaciones en turquesa. "
-        "Cuando el total supera la cuota del período, el exceso aparece en rojo."
+        "La barra crece con cada turno: trabajo efectivo en azul, vacaciones en turquesa y "
+        "faltas/permisos en morado. Cuando el total supera la cuota del período, el exceso aparece en rojo."
     )
 
-    # Separar horas efectivas de trabajo real vs vacaciones por funcionario.
-    es_vac = (
-        completos["Observaciones"].fillna("").astype(str)
-        .str.strip().str.lower().str.startswith("vacaciones")
-    )
-    comp_tipo = completos.assign(_EsVac=es_vac)
+    # Clasificar horas efectivas por funcionario: trabajo / vacaciones / eventos.
+    comp_tipo = completos.assign(_Clase=completos["Observaciones"].apply(_clasificar_obs))
     piv = (
-        comp_tipo.groupby(["Nombre", "_EsVac"], dropna=True)["Horas Efectivas"]
+        comp_tipo.groupby(["Nombre", "_Clase"], dropna=True)["Horas Efectivas"]
         .sum()
         .unstack(fill_value=0.0)
     )
-    piv = piv.rename(columns={False: "H_Trab", True: "H_Vac"})
-    for col in ("H_Trab", "H_Vac"):
+    for col in ("trabajo", "vacaciones", "evento"):
         if col not in piv.columns:
             piv[col] = 0.0
+    piv = piv.rename(columns={"trabajo": "H_Trab", "vacaciones": "H_Vac", "evento": "H_Evt"})
     agg_emp = piv.reset_index()
-    agg_emp["Total Efectivas"] = agg_emp["H_Trab"] + agg_emp["H_Vac"]
+    agg_emp["Total Efectivas"] = agg_emp["H_Trab"] + agg_emp["H_Vac"] + agg_emp["H_Evt"]
     agg_emp = agg_emp.sort_values("Total Efectivas", ascending=False).head(12)
 
-    # Conteo de turnos por funcionario: trabajados (no vacaciones) y días de vacaciones.
-    conteo = comp_tipo.groupby(["Nombre", "_EsVac"]).size().unstack(fill_value=0)
-    conteo = conteo.rename(columns={False: "Turnos Trabajados", True: "Dias Vacaciones"})
-    for col in ("Turnos Trabajados", "Dias Vacaciones"):
+    # Conteo de turnos por clase, por funcionario.
+    conteo = comp_tipo.groupby(["Nombre", "_Clase"]).size().unstack(fill_value=0)
+    for col in ("trabajo", "vacaciones", "evento"):
         if col not in conteo.columns:
             conteo[col] = 0
+    conteo = conteo.rename(columns={
+        "trabajo": "Turnos Trabajados", "vacaciones": "Dias Vacaciones", "evento": "Dias Eventos",
+    })
     agg_emp = agg_emp.merge(
-        conteo[["Turnos Trabajados", "Dias Vacaciones"]].reset_index(),
+        conteo[["Turnos Trabajados", "Dias Vacaciones", "Dias Eventos"]].reset_index(),
         on="Nombre", how="left",
     )
-    agg_emp[["Turnos Trabajados", "Dias Vacaciones"]] = (
-        agg_emp[["Turnos Trabajados", "Dias Vacaciones"]].fillna(0).astype(int)
-    )
+    for c in ("Turnos Trabajados", "Dias Vacaciones", "Dias Eventos"):
+        agg_emp[c] = agg_emp[c].fillna(0).astype(int)
 
     # cuota_periodo y df_esp ya calculados al inicio de la función.
-    # La cuota se llena primero con vacaciones y luego con trabajo; el excedente
-    # del total (sea del tipo que sea) se marca como "Sobre cuota".
+    # La cuota se llena en orden vacaciones → eventos → trabajo; el excedente del
+    # total se marca como "Sobre cuota".
     if cuota_periodo > 0:
         agg_emp["Vacaciones"] = agg_emp["H_Vac"].clip(upper=cuota_periodo)
-        agg_emp["Trabajo"] = agg_emp["H_Trab"].clip(
+        agg_emp["Faltas/Permisos"] = agg_emp["H_Evt"].clip(
             upper=(cuota_periodo - agg_emp["H_Vac"]).clip(lower=0)
+        )
+        agg_emp["Trabajo"] = agg_emp["H_Trab"].clip(
+            upper=(cuota_periodo - agg_emp["H_Vac"] - agg_emp["H_Evt"]).clip(lower=0)
         )
         agg_emp["Sobre cuota"] = (agg_emp["Total Efectivas"] - cuota_periodo).clip(lower=0)
     else:
         agg_emp["Vacaciones"] = agg_emp["H_Vac"]
+        agg_emp["Faltas/Permisos"] = agg_emp["H_Evt"]
         agg_emp["Trabajo"] = agg_emp["H_Trab"]
         agg_emp["Sobre cuota"] = 0.0
 
     orden_nombres = agg_emp["Nombre"].tolist()
     barras = agg_emp.melt(
-        id_vars=["Nombre", "Turnos Trabajados", "Dias Vacaciones"],
-        value_vars=["Trabajo", "Vacaciones", "Sobre cuota"],
+        id_vars=["Nombre", "Turnos Trabajados", "Dias Vacaciones", "Dias Eventos"],
+        value_vars=["Trabajo", "Vacaciones", "Faltas/Permisos", "Sobre cuota"],
         var_name="Segmento",
         value_name="Horas",
     )
-    _orden_seg = {"Trabajo": 0, "Vacaciones": 1, "Sobre cuota": 2}
+    _orden_seg = {"Trabajo": 0, "Vacaciones": 1, "Faltas/Permisos": 2, "Sobre cuota": 3}
     barras["_orden"] = barras["Segmento"].map(_orden_seg)
 
     chart_barras = (
@@ -752,8 +787,8 @@ def _render_dashboard(df: pd.DataFrame) -> None:
                 "Segmento:N",
                 title=None,
                 scale=alt.Scale(
-                    domain=["Trabajo", "Vacaciones", "Sobre cuota"],
-                    range=[BRAND_NAVY, BRAND_VAC, BRAND_RED],
+                    domain=["Trabajo", "Vacaciones", "Faltas/Permisos", "Sobre cuota"],
+                    range=[BRAND_NAVY, BRAND_VAC, BRAND_EVENTO, BRAND_RED],
                 ),
                 legend=alt.Legend(orient="top", symbolType="square"),
             ),
@@ -764,6 +799,7 @@ def _render_dashboard(df: pd.DataFrame) -> None:
                 alt.Tooltip("Horas:Q", title="Horas", format=".1f"),
                 alt.Tooltip("Turnos Trabajados:Q", title="Turnos trabajados", format="d"),
                 alt.Tooltip("Dias Vacaciones:Q", title="Días de vacaciones", format="d"),
+                alt.Tooltip("Dias Eventos:Q", title="Días falta/permiso", format="d"),
             ],
         )
         .properties(height=360)
@@ -863,7 +899,7 @@ def _render_comparativo_horas(df: pd.DataFrame) -> None:
     comp_mes["Mes"] = comp_mes["Mes"].astype(int)
 
     # ── Gráfico mensual (total equipo) ──────────────────────────────────────
-    _section_title("🎯 Horas esperadas vs efectivas por mes (total equipo)")
+    _section_title("Horas esperadas vs efectivas por mes (total equipo)")
     st.caption("Las horas esperadas se escalan por el número de funcionarios activos cada mes.")
 
     activos_por_mes = (
@@ -956,7 +992,7 @@ def _render_comparativo_horas(df: pd.DataFrame) -> None:
             )
 
     # ── Detalle por funcionario ──────────────────────────────────────────────
-    _section_title("👤 Horas efectivas vs esperadas por funcionario")
+    _section_title("Horas efectivas vs esperadas por funcionario")
     st.caption(
         "Horas esperadas por persona = suma de horas del calendario "
         "para cada mes en que el funcionario registró al menos un turno completo."
@@ -1137,7 +1173,7 @@ def _render_tabla(df: pd.DataFrame) -> None:
 
     csv = df.to_csv(index=False).encode("utf-8-sig")
     st.download_button(
-        "📥 Descargar CSV",
+        "Descargar CSV",
         data=csv,
         file_name=f"registros_{today_ecuador().isoformat()}.csv",
         mime="text/csv",
@@ -1289,8 +1325,10 @@ def _dialogo_confirmar_correccion() -> None:
             st.rerun()
 
 
-def _render_correcciones(areas_permitidas=None) -> None:
-    """Flujo para cerrar turnos abiertos o crear registros históricos. Solo super admin."""
+def _render_correcciones(areas_permitidas=None, df_filt=None) -> None:
+    """Flujo para cerrar turnos abiertos, crear registros históricos o editar
+    turnos cerrados. Solo super admin. `df_filt` son los registros ya filtrados
+    del dashboard, usados por la opción de edición para respetar los filtros."""
     st.caption(
         "Úsalo cuando un empleado olvidó marcar entrada, salida o ambas. "
         "Toda corrección queda registrada en 'Observaciones' con el prefijo 'Registro manual:' para auditoría."
@@ -1381,6 +1419,8 @@ def _render_correcciones(areas_permitidas=None) -> None:
             "Cerrar un turno abierto (olvido de SALIDA)",
             "Registrar entrada manual (sin salida aún)",
             "Crear registro histórico completo (olvido de ENTRADA y/o SALIDA)",
+            "Editar un turno ya cerrado",
+            "Eliminar un turno (borrado definitivo)",
         ],
         key="modo_corr",
     )
@@ -1432,12 +1472,12 @@ def _render_correcciones(areas_permitidas=None) -> None:
                 key=f"confirm_turno_largo_{rev}",
             )
 
-            if st.button("💾 Cerrar turno", key=f"btn_close_{rev}"):
+            if st.button("Cerrar turno", key=f"btn_close_{rev}"):
                 det = obs_det.strip()
                 if f_sal is None:
                     st.error("Selecciona una fecha de salida.")
                 elif not det:
-                    st.error("⚠️ Ingresa un detalle válido en la observación.")
+                    st.error("Ingresa un detalle válido en la observación.")
                 else:
                     ts_sal = datetime.combine(f_sal, h_sal)
                     if ts_sal <= ts_ent:
@@ -1446,7 +1486,7 @@ def _render_correcciones(areas_permitidas=None) -> None:
                         horas = calcular_horas(ts_ent, ts_sal)
                         if horas > 15 and not confirm_largo:
                             st.warning(
-                                f"⚠️ El turno tiene **{horas:.2f} h**. "
+                                f"El turno tiene **{horas:.2f} h**. "
                                 "Marca la casilla de confirmación antes de cerrar."
                             )
                         elif horas > UMBRAL_HORAS_EXTRA and len(det) < MIN_JUSTIF_CHARS:
@@ -1477,7 +1517,7 @@ def _render_correcciones(areas_permitidas=None) -> None:
             with c2:
                 h_ent = _time_input("Hora de entrada", time(0, 0), f"h_ent_manual_{rev}")
 
-            if st.button("💾 Registrar entrada", key=f"btn_ent_manual_{rev}"):
+            if st.button("Registrar entrada", key=f"btn_ent_manual_{rev}"):
                 if f_ent is None:
                     st.error("Selecciona una fecha de entrada.")
                 else:
@@ -1492,7 +1532,7 @@ def _render_correcciones(areas_permitidas=None) -> None:
                             "ts_in": ts_in,
                         }
 
-    else:
+    elif modo.startswith("Crear"):
         st.caption("Ambas marcas se ingresan manualmente. Úsalo solo para turnos ya pasados.")
         c1, c2 = st.columns(2)
         with c1:
@@ -1514,12 +1554,12 @@ def _render_correcciones(areas_permitidas=None) -> None:
                                     placeholder="Describe por qué se ingresa manualmente...",
                                     label_visibility="collapsed")
 
-        if st.button("💾 Crear registro", key=f"btn_m_{rev}"):
+        if st.button("Crear registro", key=f"btn_m_{rev}"):
             det = obs_det.strip()
             if f_ent is None or f_sal is None:
                 st.error("Selecciona fecha de entrada y salida.")
             elif not det:
-                st.error("⚠️ Ingresa un detalle válido en la observación.")
+                st.error("Ingresa un detalle válido en la observación.")
             else:
                 ts_in = datetime.combine(f_ent, h_ent)
                 ts_out = datetime.combine(f_sal, h_sal)
@@ -1542,6 +1582,12 @@ def _render_correcciones(areas_permitidas=None) -> None:
                             "horas": horas,
                             "obs": det,
                         }
+
+    elif modo.startswith("Editar"):
+        _flujo_editar_turno(emp_corr, df_filt)
+
+    elif modo.startswith("Eliminar"):
+        _flujo_eliminar_turno(emp_corr, df_filt)
 
     if st.session_state.get("_corr_pendiente"):
         _dialogo_confirmar_correccion()
@@ -1652,52 +1698,52 @@ def _dialogo_confirmar_edicion() -> None:
             st.rerun()
 
 
-def _render_editar_turnos(df: pd.DataFrame) -> None:
+def _flujo_editar_turno(emp_corr, df: pd.DataFrame) -> None:
+    """Edición de un turno ya cerrado del empleado seleccionado.
+
+    Recibe el empleado elegido en el formulario de correcciones y el DataFrame
+    YA FILTRADO del dashboard, así la tabla respeta los filtros activos (fechas,
+    área, estado). No duplica la selección de área/empleado."""
     admin_user = st.session_state.get("admin_user", "")
-    areas_admin = AREAS_POR_ADMIN.get(admin_user)
     rev = st.session_state.get("_edit_rev", 0)
 
-    todas_areas = sorted(AREAS) if areas_admin is None else sorted(areas_admin)
+    st.caption(
+        "Corrige un turno ya cerrado cuando el horario o las horas registradas no "
+        "corresponden. Solo se muestran turnos normales dentro de los filtros activos "
+        "(las eventualidades —vacaciones, faltas, permisos— no se editan aquí); "
+        "la observación original del funcionario se conserva."
+    )
 
-    c1, c2 = st.columns([2, 3])
-    with c1:
-        area_sel = st.selectbox(
-            "Área",
-            [None] + todas_areas,
-            format_func=lambda x: "— Selecciona un área —" if x is None else x,
-            key=f"edit_area_{rev}",
-        )
-    with c2:
-        lista_emp = [None] + sorted(EMPLEADOS_POR_AREA.get(area_sel, [])) if area_sel else [None]
-        emp_sel = st.selectbox(
-            "Empleado",
-            lista_emp,
-            format_func=lambda x: "— Selecciona un empleado —" if x is None else x,
-            key=f"edit_emp_{rev}",
-        )
-
-    if area_sel is None or emp_sel is None:
-        st.info("Selecciona un área y un empleado para ver sus turnos cerrados.")
+    if df is None or df.empty:
+        st.info("No hay registros en los filtros activos.")
         return
 
-    cerrados = df[(df["Estado"] == "Completo") & (df["Nombre"] == emp_sel)].copy().reset_index(drop=True)
+    nombre_col = df["Nombre"].fillna("").astype(str).str.strip()
+    estado_col = df["Estado"].fillna("").astype(str).str.strip().str.casefold()
+    clase = df["Observaciones"].apply(_clasificar_obs)
+    mask = (nombre_col == str(emp_corr).strip()) & (estado_col == "completo") & (clase == "trabajo")
+    cerrados = df[mask].copy().sort_values("Timestamp Entrada").reset_index(drop=True)
 
     if cerrados.empty:
-        st.info(f"No hay turnos cerrados para **{emp_sel}** en el período filtrado.")
+        st.info(f"{emp_corr} no tiene turnos normales cerrados dentro de los filtros activos.")
         return
 
-    st.markdown(f"**{len(cerrados)} turno(s) cerrado(s) para {emp_sel}** — haz clic en una fila para seleccionarla.")
+    st.caption(f"{len(cerrados)} turno(s) cerrado(s) en los filtros activos. Selecciona una fila para editarla.")
 
     cols_disp = ["Fecha de Turno", "Timestamp Entrada", "Timestamp Salida",
                  "Horas Trabajadas", "Horas Efectivas", "Horas Extra", "Observaciones"]
     cerrados_disp = cerrados[cols_disp].copy()
+    for col in ["Timestamp Entrada", "Timestamp Salida"]:
+        cerrados_disp[col] = cerrados_disp[col].apply(
+            lambda v: pd.Timestamp(v).strftime("%Y-%m-%d %H:%M") if pd.notna(v) else "—"
+        )
     for col in ["Horas Trabajadas", "Horas Efectivas", "Horas Extra"]:
-        cerrados_disp[col] = cerrados_disp[col].apply(_dec_a_hhmm)
+        cerrados_disp[col] = pd.to_numeric(cerrados_disp[col], errors="coerce").apply(_dec_a_hhmm)
 
     event = st.dataframe(
         cerrados_disp,
         use_container_width=True,
-        hide_index=False,
+        hide_index=True,
         on_select="rerun",
         selection_mode="single-row",
         key=f"edit_tabla_{rev}",
@@ -1708,21 +1754,25 @@ def _render_editar_turnos(df: pd.DataFrame) -> None:
         return
 
     turno = cerrados.iloc[sel_rows[0]]
-    ts_entrada_str_orig = str(turno["Timestamp Entrada"])
 
-    ts_ent_orig = parse_timestamp_flexible(ts_entrada_str_orig)
-    ts_sal_orig = parse_timestamp_flexible(str(turno["Timestamp Salida"]))
+    ts_ent_val = turno["Timestamp Entrada"]
+    ts_sal_val = turno["Timestamp Salida"]
+    ts_ent_orig = pd.Timestamp(ts_ent_val).to_pydatetime() if pd.notna(ts_ent_val) else None
+    ts_sal_orig = pd.Timestamp(ts_sal_val).to_pydatetime() if pd.notna(ts_sal_val) else None
+    if ts_ent_orig is None:
+        st.error("Este turno no tiene una hora de entrada válida y no puede editarse aquí.")
+        return
+    ts_entrada_str_orig = ts_ent_orig.strftime(TS_FMT)
+
     obs_orig = str(turno.get("Observaciones", "") or "").strip()
     if obs_orig.lower() == "nan":
         obs_orig = ""
 
-    try:
-        h_orig = float(turno["Horas Trabajadas"])
-    except (ValueError, TypeError):
-        h_orig = 0.0
+    h_orig_num = pd.to_numeric(turno["Horas Trabajadas"], errors="coerce")
+    h_orig = float(h_orig_num) if pd.notna(h_orig_num) else 0.0
 
     st.divider()
-    _section_title("✏️ Corregir turno seleccionado")
+    _section_title("Corregir turno seleccionado")
 
     c1, c2 = st.columns(2)
     with c1:
@@ -1750,7 +1800,7 @@ def _render_editar_turnos(df: pd.DataFrame) -> None:
         placeholder="Ej: Horario corregido por discrepancia confirmada con el supervisor...",
     )
 
-    if st.button("🔍 Revisar cambios", type="primary", use_container_width=True, key=f"edit_btn_{rev}"):
+    if st.button("Revisar cambios", type="primary", use_container_width=True, key=f"edit_btn_{rev}"):
         if f_ent is None or f_sal is None:
             st.error("Completa ambas fechas.")
         else:
@@ -1761,7 +1811,7 @@ def _render_editar_turnos(df: pd.DataFrame) -> None:
             else:
                 horas_nuevas = calcular_horas(ts_ent_nueva, ts_sal_nueva)
                 st.session_state["_edit_pendiente"] = {
-                    "nombre": emp_sel,
+                    "nombre": emp_corr,
                     "ts_entrada_str_orig": ts_entrada_str_orig,
                     "ts_ent_orig": ts_ent_orig,
                     "ts_sal_orig": ts_sal_orig,
@@ -1778,17 +1828,144 @@ def _render_editar_turnos(df: pd.DataFrame) -> None:
         _dialogo_confirmar_edicion()
 
 
-# ── Módulo de Vacaciones ────────────────────────────────────────────────────
-VAC_HORA_ENTRADA = time(8, 0)
-VAC_HORA_SALIDA = time(17, 0)
-VAC_OBSERVACION = "Vacaciones"
+@st.dialog("Eliminar turno", width="large")
+def _dialogo_confirmar_borrado() -> None:
+    payload = st.session_state.get("_del_pendiente")
+    if not payload:
+        st.rerun()
+        return
+
+    st.warning("Esta acción elimina el turno de forma definitiva. No se puede deshacer.")
+
+    def _fila(label: str, valor: str, color: str = BRAND_NAVY) -> str:
+        return (
+            f"<div style='display:flex;justify-content:space-between;align-items:center;"
+            f"padding:7px 0;border-bottom:1px solid #eef0f6;'>"
+            f"<span style='color:{BRAND_MUTED};font-size:.85rem;'>{label}</span>"
+            f"<span style='font-weight:600;color:{color};font-size:.95rem;'>{valor}</span>"
+            f"</div>"
+        )
+
+    st.markdown(
+        f"<div style='background:{BRAND_BG_SOFT};border-radius:10px;padding:4px 14px 8px;margin-bottom:12px;'>"
+        + _fila("Empleado", payload["nombre"])
+        + _fila("Fecha de turno", payload["fecha"])
+        + _fila("Entrada", payload["entrada"])
+        + _fila("Salida", payload["salida"])
+        + _fila("Estado", payload["estado"])
+        + _fila("Observaciones", payload["obs"] or "—")
+        + "</div>",
+        unsafe_allow_html=True,
+    )
+
+    bc, bx = st.columns(2)
+    with bc:
+        if st.button("Eliminar definitivamente", type="primary", use_container_width=True, key="del_dlg_confirm"):
+            if bloquear_doble_click("del_confirm"):
+                st.rerun()
+                return
+            ok = eliminar_por_entrada(payload["nombre"], payload["ts_entrada_str"])
+            if ok:
+                set_flash(f"Turno de {payload['nombre']} ({payload['fecha']}) eliminado")
+                st.session_state["_del_pendiente"] = None
+                st.session_state["_del_rev"] = st.session_state.get("_del_rev", 0) + 1
+                st.rerun()
+            else:
+                st.error("No se encontró el turno en la hoja. Puede haber sido modificado. Recarga la página.")
+    with bx:
+        if st.button("Cancelar", use_container_width=True, key="del_dlg_cancel"):
+            st.session_state["_del_pendiente"] = None
+            st.rerun()
+
+
+def _flujo_eliminar_turno(emp_corr, df: pd.DataFrame) -> None:
+    """Elimina un turno mal ingresado del empleado seleccionado. Muestra todos
+    los turnos del empleado dentro de los filtros activos (cualquier estado,
+    incluidas eventualidades) y permite borrar uno con confirmación."""
+    rev = st.session_state.get("_del_rev", 0)
+
+    st.caption(
+        "Borra un turno mal ingresado. Se muestran todos los turnos del funcionario "
+        "dentro de los filtros activos. El borrado es definitivo."
+    )
+
+    if df is None or df.empty:
+        st.info("No hay registros en los filtros activos.")
+        return
+
+    nombre_col = df["Nombre"].fillna("").astype(str).str.strip()
+    cerrados = df[nombre_col == str(emp_corr).strip()].copy().sort_values("Timestamp Entrada").reset_index(drop=True)
+
+    if cerrados.empty:
+        st.info(f"{emp_corr} no tiene turnos dentro de los filtros activos.")
+        return
+
+    st.caption(f"{len(cerrados)} turno(s) en los filtros activos. Selecciona la fila a eliminar.")
+
+    cols_disp = ["Fecha de Turno", "Timestamp Entrada", "Timestamp Salida",
+                 "Horas Trabajadas", "Estado", "Observaciones"]
+    disp = cerrados[cols_disp].copy()
+    for col in ["Timestamp Entrada", "Timestamp Salida"]:
+        disp[col] = disp[col].apply(lambda v: pd.Timestamp(v).strftime("%Y-%m-%d %H:%M") if pd.notna(v) else "—")
+    disp["Horas Trabajadas"] = pd.to_numeric(disp["Horas Trabajadas"], errors="coerce").apply(_dec_a_hhmm)
+
+    event = st.dataframe(
+        disp,
+        use_container_width=True,
+        hide_index=True,
+        on_select="rerun",
+        selection_mode="single-row",
+        key=f"del_tabla_{rev}",
+    )
+
+    sel_rows = event.selection.rows
+    if not sel_rows:
+        return
+
+    turno = cerrados.iloc[sel_rows[0]]
+    ts_ent_val = turno["Timestamp Entrada"]
+    if pd.isna(ts_ent_val):
+        st.error("Este turno no tiene hora de entrada válida y no puede eliminarse desde aquí.")
+        return
+    ts_ent_dt = pd.Timestamp(ts_ent_val).to_pydatetime()
+    ts_sal_val = turno["Timestamp Salida"]
+    fecha_turno = turno["Fecha de Turno"]
+    obs = str(turno.get("Observaciones", "") or "").strip()
+    if obs.lower() == "nan":
+        obs = ""
+
+    if st.button("Eliminar turno seleccionado", type="primary", use_container_width=True, key=f"del_btn_{rev}"):
+        st.session_state["_del_pendiente"] = {
+            "nombre": emp_corr,
+            "ts_entrada_str": ts_ent_dt.strftime(TS_FMT),
+            "fecha": str(fecha_turno),
+            "entrada": ts_ent_dt.strftime("%Y-%m-%d %H:%M"),
+            "salida": pd.Timestamp(ts_sal_val).strftime("%Y-%m-%d %H:%M") if pd.notna(ts_sal_val) else "—",
+            "estado": str(turno.get("Estado", "")),
+            "obs": obs,
+        }
+
+    if st.session_state.get("_del_pendiente"):
+        _dialogo_confirmar_borrado()
+
+
+# ── Módulo de Eventualidades ────────────────────────────────────────────────
+EVT_HORA_ENTRADA = time(8, 0)
+EVT_HORA_SALIDA = time(17, 0)
 
 _DIAS_ES = {0: "Lun", 1: "Mar", 2: "Mié", 3: "Jue", 4: "Vie", 5: "Sáb", 6: "Dom"}
 
 
-@st.dialog("Confirmar registro de vacaciones", width="large")
-def _dialogo_confirmar_vacaciones() -> None:
-    payload = st.session_state.get("_vac_pendiente")
+def _obs_evento(tipo: str, subcat, admin_user: str) -> str:
+    """Construye la observación del evento. Vacaciones empieza con 'Vacaciones'
+    para que el gráfico de progreso la siga reconociendo."""
+    base = tipo if tipo == EVENTO_VACACIONES else f"{tipo} - {subcat}"
+    return f"{base} (registrado por {admin_user})"
+
+
+@st.dialog("Confirmar registro de eventualidad", width="large")
+def _dialogo_confirmar_evento() -> None:
+    payload = st.session_state.get("_evt_pendiente")
     if not payload:
         st.rerun()
         return
@@ -1796,8 +1973,7 @@ def _dialogo_confirmar_vacaciones() -> None:
     dias_nuevos = [date.fromisoformat(s) for s in payload["dias_nuevos"]]
     dias_saltados = [date.fromisoformat(s) for s in payload["dias_saltados"]]
     n = len(dias_nuevos)
-    h_ef_dia = calcular_horas_efectivas(9.0)
-    h_ef_total = n * h_ef_dia
+    h_ef_total = n * calcular_horas_efectivas(9.0)
 
     def _fila(label: str, valor: str, color: str = BRAND_NAVY) -> str:
         return (
@@ -1811,15 +1987,23 @@ def _dialogo_confirmar_vacaciones() -> None:
     f_ini = date.fromisoformat(payload["f_ini"])
     f_fin = date.fromisoformat(payload["f_fin"])
 
-    st.markdown(
-        f"<div style='background:{BRAND_BG_SOFT};border-radius:10px;padding:4px 14px 8px;margin-bottom:12px;'>"
-        + _fila("Empleado", payload["emp"])
+    filas = (
+        _fila("Empleado", payload["emp"])
         + _fila("Área", payload["area"])
-        + _fila("Rango solicitado", f"{f_ini.strftime('%d/%m/%Y')} → {f_fin.strftime('%d/%m/%Y')}")
+        + _fila("Tipo de evento", payload["tipo"])
+    )
+    if payload.get("subcat"):
+        filas += _fila("Motivo", payload["subcat"])
+    filas += (
+        _fila("Rango solicitado", f"{f_ini.strftime('%d/%m/%Y')} → {f_fin.strftime('%d/%m/%Y')}")
         + _fila("Turno por día", "08:00 → 17:00  ·  9 h (8 h efectivas, 1 h almuerzo)")
         + _fila("Días a registrar", f"{n} día(s) laborable(s)", BRAND_RED)
         + _fila("Total horas efectivas", f"{h_ef_total:.0f} h")
-        + "</div>",
+    )
+
+    st.markdown(
+        f"<div style='background:{BRAND_BG_SOFT};border-radius:10px;padding:4px 14px 8px;margin-bottom:12px;'>"
+        + filas + "</div>",
         unsafe_allow_html=True,
     )
 
@@ -1829,29 +2013,29 @@ def _dialogo_confirmar_vacaciones() -> None:
         f"{_DIAS_ES[d.weekday()]} {d.strftime('%d/%m')}</span>"
         for d in dias_nuevos
     )
-    st.markdown("**Días que se registrarán como vacaciones:**")
+    st.markdown("**Días que se registrarán:**")
     st.markdown(f"<div style='line-height:2;'>{chips}</div>", unsafe_allow_html=True)
 
     if dias_saltados:
         saltados_str = ", ".join(f"{_DIAS_ES[d.weekday()]} {d.strftime('%d/%m')}" for d in dias_saltados)
-        st.caption(f"⏭️ {len(dias_saltados)} día(s) se omiten porque ya tienen un turno registrado: {saltados_str}")
+        st.caption(f"{len(dias_saltados)} día(s) se omiten porque ya tienen un turno registrado: {saltados_str}")
 
     st.divider()
     bc, bx = st.columns(2)
     with bc:
-        if st.button("Confirmar vacaciones", type="primary", use_container_width=True, key="vac_dlg_confirm"):
-            if bloquear_doble_click("vac_confirm"):
+        if st.button("Confirmar registro", type="primary", use_container_width=True, key="evt_dlg_confirm"):
+            if bloquear_doble_click("evt_confirm"):
                 st.rerun()
                 return
             emp = payload["emp"]
             area = payload["area"]
-            obs = f"{VAC_OBSERVACION} (registrado por {payload['admin_user']})"
-            filas = []
+            obs = _obs_evento(payload["tipo"], payload.get("subcat"), payload["admin_user"])
+            filas_reg = []
             for d in dias_nuevos:
-                ts_in = datetime.combine(d, VAC_HORA_ENTRADA)
-                ts_out = datetime.combine(d, VAC_HORA_SALIDA)
+                ts_in = datetime.combine(d, EVT_HORA_ENTRADA)
+                ts_out = datetime.combine(d, EVT_HORA_SALIDA)
                 horas = calcular_horas(ts_in, ts_out)
-                filas.append({
+                filas_reg.append({
                     "Nombre": emp,
                     "Area": area,
                     "Fecha de Turno": d.strftime("%Y-%m-%d"),
@@ -1863,40 +2047,46 @@ def _dialogo_confirmar_vacaciones() -> None:
                     "Estado": "Completo",
                     "Observaciones": obs,
                 })
-            n_ins = append_registros_batch(filas)
-            set_flash(f"{n_ins} día(s) de vacaciones registrados para {emp}", icono="🏖️")
-            st.session_state["_vac_pendiente"] = None
-            st.session_state["_vac_rev"] = st.session_state.get("_vac_rev", 0) + 1
+            n_ins = append_registros_batch(filas_reg)
+            set_flash(f"{n_ins} día(s) registrados para {emp} — {payload['tipo']}")
+            st.session_state["_evt_pendiente"] = None
+            st.session_state["_evt_rev"] = st.session_state.get("_evt_rev", 0) + 1
             st.rerun()
     with bx:
-        if st.button("Cancelar", use_container_width=True, key="vac_dlg_cancel"):
-            st.session_state["_vac_pendiente"] = None
+        if st.button("Cancelar", use_container_width=True, key="evt_dlg_cancel"):
+            st.session_state["_evt_pendiente"] = None
             st.rerun()
 
 
-def _render_vacaciones() -> None:
+def _render_eventualidades() -> None:
     admin_user = st.session_state.get("admin_user", "")
     areas_admin = AREAS_POR_ADMIN.get(admin_user)
-    rev = st.session_state.get("_vac_rev", 0)
+    rev = st.session_state.get("_evt_rev", 0)
 
     st.caption(
-        "Registra un rango de vacaciones para un empleado. Por cada día laborable (lunes a viernes) "
-        "se crea un turno de 08:00 a 17:00 — 9 h trabajadas, 8 h efectivas (1 h de almuerzo) — "
-        "con la observación 'Vacaciones'. Los días que ya tengan un turno registrado se omiten."
+        "Registra faltas justificadas, permisos o vacaciones. Cada día del rango se crea "
+        "como un turno de 08:00 a 17:00 (9 h trabajadas, 8 h efectivas) con el motivo en "
+        "observaciones. Vacaciones solo toma días laborables (L-V); faltas y permisos toman "
+        "todos los días. Los días que ya tengan un turno se omiten."
     )
 
-    areas_vac = sorted(AREAS) if areas_admin is None else sorted(areas_admin)
-    if not areas_vac:
-        st.warning("No tienes áreas habilitadas para registrar vacaciones.")
+    areas_evt = sorted(AREAS) if areas_admin is None else sorted(areas_admin)
+    if not areas_evt:
+        st.warning("No tienes áreas habilitadas para registrar eventualidades.")
         return
+
+    tipo = st.selectbox("Tipo de evento", TIPOS_EVENTO, key=f"evt_tipo_{rev}")
+    subcat = None
+    if tipo != EVENTO_VACACIONES:
+        subcat = st.selectbox("Motivo", SUBCATEGORIAS_EVENTO, key=f"evt_sub_{rev}")
 
     c1, c2 = st.columns([2, 3])
     with c1:
         area_sel = st.selectbox(
             "Área",
-            [None] + areas_vac,
+            [None] + areas_evt,
             format_func=lambda x: "— Selecciona un área —" if x is None else x,
-            key=f"vac_area_{rev}",
+            key=f"evt_area_{rev}",
         )
     with c2:
         lista_emp = [None] + sorted(EMPLEADOS_POR_AREA.get(area_sel, [])) if area_sel else [None]
@@ -1904,33 +2094,36 @@ def _render_vacaciones() -> None:
             "Empleado",
             lista_emp,
             format_func=lambda x: "— Selecciona un empleado —" if x is None else x,
-            key=f"vac_emp_{rev}",
+            key=f"evt_emp_{rev}",
         )
 
     if area_sel is None or emp_sel is None:
-        st.info("Selecciona un área y un empleado para registrar vacaciones.")
+        st.info("Selecciona un área y un empleado para registrar el evento.")
         return
 
     c3, c4 = st.columns(2)
     with c3:
-        f_ini = st.date_input("Inicio de vacaciones", value=None, key=f"vac_ini_{rev}")
+        f_ini = st.date_input("Fecha de inicio", value=None, key=f"evt_ini_{rev}")
     with c4:
-        f_fin = st.date_input("Fin de vacaciones", value=None, key=f"vac_fin_{rev}")
+        f_fin = st.date_input("Fecha de fin", value=None, key=f"evt_fin_{rev}")
 
-    if st.button("🔍 Revisar vacaciones", type="primary", use_container_width=True, key=f"vac_btn_{rev}"):
+    if st.button("Revisar registro", type="primary", use_container_width=True, key=f"evt_btn_{rev}"):
         if f_ini is None or f_fin is None:
             st.error("Selecciona fecha de inicio y fin.")
         elif f_fin < f_ini:
             st.error("La fecha de fin debe ser igual o posterior a la de inicio.")
         else:
-            dias_lv = []
+            # Vacaciones: solo días laborables (L-V). Faltas/permisos: todos los
+            # días, porque hay funcionarios con turnos también en fin de semana.
+            solo_laborables = (tipo == EVENTO_VACACIONES)
+            dias = []
             d = f_ini
             while d <= f_fin:
-                if d.weekday() < 5:  # 0-4 = lunes a viernes
-                    dias_lv.append(d)
+                if not solo_laborables or d.weekday() < 5:
+                    dias.append(d)
                 d += timedelta(days=1)
 
-            if not dias_lv:
+            if not dias:
                 st.warning("El rango seleccionado no contiene días laborables (lunes a viernes).")
             else:
                 df_act = leer_registros()
@@ -1942,15 +2135,17 @@ def _render_vacaciones() -> None:
                         f = parse_fecha_flexible(raw)
                         if f:
                             fechas_emp.add(f)
-                dias_nuevos = [d for d in dias_lv if d not in fechas_emp]
-                dias_saltados = [d for d in dias_lv if d in fechas_emp]
+                dias_nuevos = [d for d in dias if d not in fechas_emp]
+                dias_saltados = [d for d in dias if d in fechas_emp]
                 if not dias_nuevos:
                     st.warning(
                         "Todos los días laborables del rango ya tienen un turno registrado "
                         f"para {emp_sel}. No hay nada que agregar."
                     )
                 else:
-                    st.session_state["_vac_pendiente"] = {
+                    st.session_state["_evt_pendiente"] = {
+                        "tipo": tipo,
+                        "subcat": subcat,
                         "emp": emp_sel,
                         "area": AREA_DE.get(emp_sel, ""),
                         "f_ini": f_ini.isoformat(),
@@ -1960,8 +2155,8 @@ def _render_vacaciones() -> None:
                         "admin_user": admin_user,
                     }
 
-    if st.session_state.get("_vac_pendiente"):
-        _dialogo_confirmar_vacaciones()
+    if st.session_state.get("_evt_pendiente"):
+        _dialogo_confirmar_evento()
 
 
 def _es_solo_lectura(admin_user: str) -> bool:
@@ -1982,18 +2177,19 @@ def vista_super_admin() -> None:
 
     _inject_brand_css()
 
-    st.title("⏱️ Marcador de Horas — Panel Administrativo")
+    st.title("Marcador de Horas — Panel Administrativo")
 
+    iniciales = "".join(p[0] for p in str(usuario).split()[:2]).upper() or "?"
     ch1, ch2 = st.columns([5, 1])
     with ch1:
         st.markdown(
             f"""
             <div class="brand-header">
                 <div class="user-block">
-                    <div class="avatar">👔</div>
+                    <div class="avatar">{iniciales}</div>
                     <div>
                         <div class="uname">{usuario}</div>
-                        <span class="role">💼 {admin_rol}</span>
+                        <span class="role">{admin_rol}</span>
                     </div>
                 </div>
             </div>
@@ -2002,7 +2198,7 @@ def vista_super_admin() -> None:
         )
     with ch2:
         st.write("")
-        if st.button("🚪 Cerrar sesión", use_container_width=True):
+        if st.button("Cerrar sesión", use_container_width=True):
             logout()
             st.rerun()
 
@@ -2015,18 +2211,18 @@ def vista_super_admin() -> None:
     df_dash = _preparar_df_dashboard(df_scope)
 
     if areas_permitidas is None:
-        st.caption("🔓 Acceso total a todas las áreas.")
+        st.caption("Acceso total a todas las áreas.")
     else:
-        st.caption(f"🔐 Áreas habilitadas: {', '.join(sorted(areas_permitidas))}" +
-                   ("  |  👁️ Solo lectura" if solo_lectura else ""))
+        st.caption(f"Áreas habilitadas: {', '.join(sorted(areas_permitidas))}" +
+                   ("  |  Solo lectura" if solo_lectura else ""))
 
     df_filt = _filtros_inline(df_dash, areas_permitidas=areas_permitidas)
 
     if solo_lectura:
         tab_dash, tab_comp, tab_tabla = st.tabs([
-            "📊 Dashboard",
-            "📈 Comparativo horas esperadas",
-            "📋 Tabla",
+            "Dashboard",
+            "Comparativo horas esperadas",
+            "Tabla",
         ])
         with tab_dash:
             _render_dashboard(df_filt)
@@ -2035,12 +2231,12 @@ def vista_super_admin() -> None:
         with tab_tabla:
             _render_tabla(df_filt)
     else:
-        tab_dash, tab_comp, tab_tabla, tab_gestion, tab_vac = st.tabs([
-            "📊 Dashboard",
-            "📈 Comparativo horas esperadas",
-            "📋 Tabla",
-            "🛠️ Gestión de turnos",
-            "🏖️ Vacaciones",
+        tab_dash, tab_comp, tab_tabla, tab_gestion, tab_evt = st.tabs([
+            "Dashboard",
+            "Comparativo horas esperadas",
+            "Tabla",
+            "Gestión de turnos",
+            "Eventualidades",
         ])
         with tab_dash:
             _render_dashboard(df_filt)
@@ -2049,13 +2245,6 @@ def vista_super_admin() -> None:
         with tab_tabla:
             _render_tabla(df_filt)
         with tab_gestion:
-            sub_corr, sub_edit = st.tabs([
-                "🔧 Correcciones (turnos pendientes)",
-                "✏️ Editar turnos cerrados",
-            ])
-            with sub_corr:
-                _render_correcciones(areas_permitidas=areas_permitidas)
-            with sub_edit:
-                _render_editar_turnos(df_filt)
-        with tab_vac:
-            _render_vacaciones()
+            _render_correcciones(areas_permitidas=areas_permitidas, df_filt=df_filt)
+        with tab_evt:
+            _render_eventualidades()

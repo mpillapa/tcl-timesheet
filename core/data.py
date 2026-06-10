@@ -334,6 +334,40 @@ def actualizar_por_entrada(nombre: str, ts_entrada_str: str, cambios: dict) -> b
     return True
 
 
+def eliminar_por_entrada(nombre: str, ts_entrada_str: str) -> bool:
+    """Elimina la fila que matchea (Nombre, Timestamp Entrada). Devuelve False
+    si no existe. Operación destructiva: borra la fila completa de la hoja."""
+    ws = _get_worksheet()
+    all_values = ws.get_all_values()
+    if len(all_values) < 2:
+        return False
+
+    header = all_values[0]
+    try:
+        i_nombre = header.index("Nombre")
+        i_entrada = header.index("Timestamp Entrada")
+    except ValueError:
+        return False
+
+    nombre_norm = _normalizar_cmp(nombre)
+    key = _ts_key(ts_entrada_str)
+    target_row = None  # índice 1-based en la hoja (fila 1 = header)
+    for offset, row in enumerate(all_values[1:], start=2):
+        if i_nombre >= len(row) or i_entrada >= len(row):
+            continue
+        if _normalizar_cmp(row[i_nombre]) != nombre_norm:
+            continue
+        if _ts_key(row[i_entrada]) == key:
+            target_row = offset
+            break
+    if target_row is None:
+        return False
+
+    ws.delete_rows(target_row)
+    leer_registros.clear()
+    return True
+
+
 def calcular_horas(ts_in: datetime, ts_out: datetime) -> float:
     return round((ts_out - ts_in).total_seconds() / 3600, 2)
 

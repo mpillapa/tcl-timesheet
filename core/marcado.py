@@ -119,20 +119,20 @@ def marcar_entrada(nombre: str) -> None:
 
             _crear_nueva_entrada(nombre, ahora)
             st.warning(
-                f"⚠️ El turno anterior de **{nombre}** ("
+                f"El turno anterior de **{nombre}** ("
                 f"{horas_abiertas:.1f} h abiertas) fue enviado a revisión de super admin. "
                 f"Se registró una nueva entrada a las {ahora.strftime('%H:%M:%S')}."
             )
             programar_cierre_sesion()
         else:
             st.warning(
-                f"⚠️ {nombre} ya tiene un turno abierto desde "
+                f"{nombre} ya tiene un turno abierto desde "
                 f"{ts_prev.strftime('%Y-%m-%d %H:%M')}. Marca la salida primero."
             )
         return
 
     _crear_nueva_entrada(nombre, ahora)
-    st.success(f"✅ Entrada registrada para **{nombre}** a las {ahora.strftime('%H:%M:%S')}")
+    st.success(f"Entrada registrada para **{nombre}** a las {ahora.strftime('%H:%M:%S')}")
     programar_cierre_sesion()
 
 
@@ -144,13 +144,13 @@ def marcar_salida(nombre: str) -> None:
 
     if idx is None:
         st.error(
-            f"❌ No se encontró un turno abierto para **{nombre}**. "
+            f"No se encontró un turno abierto para **{nombre}**. "
             "Si olvidaste marcar entrada, contacta a tu supervisor."
         )
         from core.data import _normalizar_cmp
         nombre_norm = _normalizar_cmp(nombre)
         filas_persona = df[df["Nombre"].fillna("").map(_normalizar_cmp) == nombre_norm]
-        with st.expander("🔍 Diagnóstico (para el administrador)"):
+        with st.expander("Diagnóstico (para el administrador)"):
             st.write(f"**Nombre buscado (normalizado):** `{nombre_norm}`")
             if filas_persona.empty:
                 st.write("No se encontró ninguna fila con ese nombre. Nombres únicos en la hoja:")
@@ -172,7 +172,7 @@ def marcar_salida(nombre: str) -> None:
     minutos_transcurridos = (ahora - ts_entrada).total_seconds() / 60
     if minutos_transcurridos < MIN_MINUTOS_TURNO:
         st.warning(
-            f"⏳ Debes esperar al menos {MIN_MINUTOS_TURNO} minutos desde la entrada para marcar salida. "
+            f"Debes esperar al menos {MIN_MINUTOS_TURNO} minutos desde la entrada para marcar salida. "
             f"Entrada registrada a las {ts_entrada.strftime('%H:%M:%S')}."
         )
         return
@@ -193,7 +193,7 @@ def marcar_salida(nombre: str) -> None:
         st.error("El turno ya no existe (pudo haber sido modificado por un administrador). Refresca la página.")
         return
     st.success(
-        f"✅ Salida registrada para **{nombre}**. "
+        f"Salida registrada para **{nombre}**. "
         f"Entrada: {ts_entrada.strftime('%H:%M')} → "
         f"Salida: {ahora.strftime('%H:%M')} — "
         f"**{_fmt_duracion(horas)} trabajadas**"
@@ -208,7 +208,7 @@ def render_formulario_justificacion() -> None:
 
     pend = st.session_state["salida_pendiente"]
     st.warning(
-        f"⏱️ **{pend['nombre']}** trabajó **{_fmt_duracion(pend['horas'])}** "
+        f"**{pend['nombre']}** trabajó **{_fmt_duracion(pend['horas'])}** "
         f"(excede el límite de {UMBRAL_HORAS_EXTRA} h). "
         "Debes ingresar una justificación válida para guardar la salida."
     )
@@ -221,9 +221,9 @@ def render_formulario_justificacion() -> None:
 
     c1, c2 = st.columns(2)
     with c1:
-        confirmar = st.button("💾 Confirmar salida", type="primary", use_container_width=True)
+        confirmar = st.button("Confirmar salida", type="primary", use_container_width=True)
     with c2:
-        cancelar = st.button("✖️ Cancelar", use_container_width=True)
+        cancelar = st.button("Cancelar", use_container_width=True)
 
     if cancelar:
         del st.session_state["salida_pendiente"]
@@ -247,6 +247,6 @@ def render_formulario_justificacion() -> None:
             return
 
         del st.session_state["salida_pendiente"]
-        st.success(f"✅ Salida registrada con justificación. Tiempo trabajado: **{_fmt_duracion(pend['horas'])}**")
+        st.success(f"Salida registrada con justificación. Tiempo trabajado: **{_fmt_duracion(pend['horas'])}**")
         programar_cierre_sesion()
         st.rerun()
