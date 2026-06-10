@@ -311,12 +311,17 @@ except AttributeError:
     alt.themes.enable("transoceanica")
 
 
+# Áreas de las unidades de carga (operaciones). Erick (jefe de operaciones) ve
+# solo estas; Paul ve todas MENOS estas; Fabian y Manuel ven todo.
+AREAS_CARGA = {"CARGA NAL UIO", "CARGA NAL GYE", "CARGA NAL SCY", "CARGA INT GYE"}
+
 AREAS_POR_ADMIN = {
     "dbuestan":  {"IMPORT"},
-    "pmena":     None,
+    "pmena":     set(AREAS) - AREAS_CARGA,   # todo menos las áreas de carga de Erick
+    "ecamposano": set(AREAS_CARGA),          # solo las áreas de carga
     "gproanio":  {"BODEGA"},
-    "fherrera":  None,
-    "mpillapa":  None,
+    "fherrera":  None,                        # acceso total
+    "mpillapa":  None,                        # acceso total
     # Solo lectura
     "ereyes":    {"BODEGA"},
     "pmaldonado": {"BODEGA", "DOCUMENTAL", "SUPERVISORES", "CALIDAD"},
