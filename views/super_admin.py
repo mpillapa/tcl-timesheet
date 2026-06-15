@@ -2,7 +2,7 @@ import streamlit as st
 import pandas as pd
 import altair as alt
 from datetime import datetime, date, time, timedelta
-from core.auth import logout
+from core.auth import logout, confiar_equipo_ui
 from core.data import (
     leer_registros,
     leer_horas_esperadas,
@@ -2208,6 +2208,9 @@ def vista_super_admin() -> None:
             st.rerun()
 
     st.markdown("<div style='height:14px;'></div>", unsafe_allow_html=True)
+
+    with st.expander("Acceso de este equipo"):
+        confiar_equipo_ui()
 
     mostrar_flash()
 

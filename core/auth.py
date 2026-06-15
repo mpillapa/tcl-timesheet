@@ -7,6 +7,8 @@ Control de acceso:
        - Super Admin -> usuario + contraseña contra secrets.super_admins.
 """
 
+import json
+
 import streamlit as st
 from streamlit_javascript import st_javascript
 
@@ -31,6 +33,89 @@ def _obtener_ip_publica_browser():
     if res == "ERROR" or not isinstance(res, str) or not res.strip():
         return ""
     return res.strip()
+
+
+# ---------------------------------------------------------------------------
+# Equipo de confianza (token persistente en el navegador / localStorage)
+#
+# Una laptop "de confianza" guarda un token en localStorage y deja de pedir la
+# clave maestra al ingresar desde fuera de la oficina. NO salta el login: el
+# super admin igual ingresa usuario + contraseña. Para revocar TODOS los equipos
+# basta con cambiar 'trusted_device_secret' en secrets (los tokens viejos dejan
+# de coincidir). No se puede leer hardware (MAC/serial) desde un navegador, por
+# eso se usa este token por-navegador.
+# ---------------------------------------------------------------------------
+def _leer_token_dispositivo():
+    """Lee el token de equipo de confianza desde localStorage.
+
+    Devuelve None mientras el navegador responde (aún cargando), "" si no hay
+    token guardado, o el token (str) si existe. Usa un centinela '__NONE__'
+    para distinguir 'sin token' de 'todavía cargando' (ambos darían None/0)."""
+    try:
+        res = st_javascript(
+            "await (async () => { const v = window.localStorage.getItem('tcl_device_token');"
+            " return (v === null) ? '__NONE__' : v; })()",
+            key="device_token_get",
+        )
+    except Exception:
+        return ""
+
+    if res in (0, None):
+        return None
+    if res == "__NONE__" or not isinstance(res, str) or not res.strip():
+        return ""
+    return res.strip()
+
+
+def _guardar_token_dispositivo(token: str) -> None:
+    st_javascript(
+        "await (async () => { window.localStorage.setItem('tcl_device_token', "
+        f"{json.dumps(token)}); return 'OK'; }})()",
+        key="device_token_set",
+    )
+
+
+def _borrar_token_dispositivo() -> None:
+    st_javascript(
+        "await (async () => { window.localStorage.removeItem('tcl_device_token');"
+        " return 'OK'; })()",
+        key="device_token_del",
+    )
+
+
+def confiar_equipo_ui() -> None:
+    """Controles para marcar/desmarcar este navegador como equipo de confianza.
+
+    Pensado para laptops de super admins: una vez marcado, el equipo deja de
+    pedir la clave maestra al ingresar desde fuera de la oficina (igual se exige
+    usuario + contraseña). Afecta solo a este navegador en este equipo."""
+    try:
+        secret_conf = str(st.secrets["auth"].get("trusted_device_secret", ""))
+    except (KeyError, FileNotFoundError):
+        secret_conf = ""
+
+    if not secret_conf:
+        st.caption(
+            "Para habilitar equipos de confianza, define 'trusted_device_secret' "
+            "en la sección [auth] de secrets."
+        )
+        return
+
+    st.caption(
+        "Marca esta laptop como de confianza para no pedir la clave maestra al "
+        "ingresar desde fuera de la oficina. Afecta solo a este navegador. "
+        "Igual deberás ingresar tu usuario y contraseña. Si pierdes el equipo, "
+        "cambia 'trusted_device_secret' en secrets para revocar todos los equipos."
+    )
+    c1, c2 = st.columns(2)
+    with c1:
+        if st.button("Confiar en este equipo", use_container_width=True, key="trust_device_btn"):
+            _guardar_token_dispositivo(secret_conf)
+            st.success("Listo. Este equipo no volverá a pedir la clave maestra.")
+    with c2:
+        if st.button("Quitar confianza", use_container_width=True, key="untrust_device_btn"):
+            _borrar_token_dispositivo()
+            st.success("Se quitó la confianza de este equipo.")
 
 
 def logout() -> None:
@@ -76,6 +161,21 @@ def _capa1_gate() -> None:
         st.session_state["gate_passed"] = True
         st.session_state["gate_via"] = f"IP oficina ({ip_browser})"
         return
+
+    # Equipo de confianza: solo se evalúa cuando la IP no coincide (los equipos
+    # de oficina ya pasaron arriba), para no penalizar el flujo común. Permite a
+    # laptops de super admins entrar sin clave maestra desde casa.
+    secret_conf = str(auth_cfg.get("trusted_device_secret", ""))
+    if secret_conf:
+        token_disp = _leer_token_dispositivo()
+        if token_disp is None:
+            st.title("Verificando equipo…")
+            st.caption("Un momento, comprobando si este equipo es de confianza.")
+            st.stop()
+        if token_disp and token_disp == secret_conf:
+            st.session_state["gate_passed"] = True
+            st.session_state["gate_via"] = "dispositivo de confianza"
+            return
 
     st.title("Acceso al marcador")
     if ip_browser:
