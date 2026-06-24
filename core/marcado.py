@@ -179,6 +179,35 @@ def marcar_salida(nombre: str) -> None:
 
     horas = calcular_horas(ts_entrada, ahora)
 
+    # Olvido de salida: si el turno superó UMBRAL_OLVIDO_H no se cierra como
+    # completo (la duración no es confiable, ej. 20 h). Se envía a revisión de
+    # supervisor sin registrar la salida, igual que detecta marcar_entrada.
+    horas_abiertas = (ahora - ts_entrada).total_seconds() / 3600
+    if horas_abiertas > UMBRAL_OLVIDO_H:
+        obs_prev = str(df.loc[idx, "Observaciones"] or "").strip()
+        if obs_prev.lower() == "nan":
+            obs_prev = ""
+        tag_revision = (
+            f"Pendiente revision supervisor: turno > {UMBRAL_OLVIDO_H} h "
+            f"(entrada {ts_entrada.strftime('%Y-%m-%d %H:%M')}, "
+            f"salida intentada {ahora.strftime('%Y-%m-%d %H:%M')})."
+        )
+        obs_nueva = f"{obs_prev} | {tag_revision}" if obs_prev else tag_revision
+        if not actualizar_por_entrada(
+            nombre, ts_entrada_str, {"Estado": ESTADO_REVISION, "Observaciones": obs_nueva}
+        ):
+            st.error("El turno ya no existe o no se pudo enviar a revisión. Refresca la página.")
+            return
+        # Aviso por pop-up en la vista del colaborador. A diferencia de una salida
+        # normal NO se cierra sesión: el empleado puede marcar su entrada para
+        # iniciar la jornada de hoy.
+        st.session_state["aviso_revision"] = {
+            "nombre": nombre,
+            "horas": horas_abiertas,
+            "entrada": ts_entrada.strftime("%Y-%m-%d %H:%M"),
+        }
+        return
+
     # Si excede el umbral, diferir guardado y pedir justificación en otro render.
     if horas > UMBRAL_HORAS_EXTRA:
         st.session_state["salida_pendiente"] = {

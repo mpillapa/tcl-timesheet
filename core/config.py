@@ -34,8 +34,9 @@ HORAS_BASE_TURNO = 9.0
 HORAS_ALMUERZO = 1.0
 MIN_HORAS_ALMUERZO = 5.0
 
-# Si un turno lleva más de este tiempo abierto, se considera olvido de salida.
-UMBRAL_OLVIDO_H = 18
+# Si un turno lleva más de este tiempo abierto, se considera olvido de salida
+# y se envía a revisión del supervisor.
+UMBRAL_OLVIDO_H = 15
 
 # Horas por encima de este valor requieren justificación obligatoria.
 UMBRAL_HORAS_EXTRA = 9.5

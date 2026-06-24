@@ -45,6 +45,20 @@ def _normalizar_cmp(value) -> str:
     return _normalizar_texto(value).casefold()
 
 
+def _normalizar_serie(serie: pd.Series) -> pd.Series:
+    """Equivalente vectorizado de _normalizar_texto sobre una columna entera.
+
+    Hace el mismo trabajo (quitar invisibles, nbsp->espacio, compactar espacios
+    y recortar) pero con operaciones .str a nivel de columna en vez de aplicar
+    una función Python celda por celda. Importa en hojas grandes: leer_registros
+    procesa todas las filas en cada lectura no cacheada."""
+    s = serie.astype(object).where(serie.notna(), "").astype(str)
+    s = s.str.replace(_INVISIBLE_RE, "", regex=True)
+    s = s.str.replace(" ", " ", regex=False)
+    s = s.str.replace(r"\s+", " ", regex=True)
+    return s.str.strip()
+
+
 def _get_worksheet():
     """Devuelve (y cachea) el objeto gspread.Worksheet usado para escrituras
     atómicas por fila. Usa las mismas credenciales del bloque
@@ -135,7 +149,10 @@ def leer_registros() -> pd.DataFrame:
             ancho = len(header)
             rows = [r[:ancho] + [""] * max(0, ancho - len(r)) for r in rows]
             df = pd.DataFrame(rows, columns=header)
-            df = df[df.apply(lambda row: any(_normalizar_texto(v) for v in row), axis=1)]
+            # Descartar filas completamente vacías. Vectorizado por columna
+            # (mucho más rápido que apply(axis=1) cuando la hoja crece).
+            con_contenido = df.apply(lambda c: c.astype(str).str.strip(), axis=0).ne("").any(axis=1)
+            df = df[con_contenido]
         else:
             df = pd.DataFrame(columns=header)
 
@@ -145,8 +162,7 @@ def leer_registros() -> pd.DataFrame:
         df = df[COLUMNAS].copy()
         df = df.astype(object)  # evita StringDtype en pandas 3.x al asignar valores numéricos
         for col in COLS_TEXTO:
-            df[col] = df[col].astype(object).where(df[col].notna(), "")
-            df[col] = df[col].map(_normalizar_texto)
+            df[col] = _normalizar_serie(df[col])
 
         # Compatibilidad: calcular columnas derivadas en filas antiguas que las tengan vacías.
         horas_num = pd.to_numeric(df["Horas Trabajadas"], errors="coerce")
