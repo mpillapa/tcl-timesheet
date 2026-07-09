@@ -12,7 +12,8 @@ import gspread
 import pandas as pd
 import streamlit as st
 
-from core.config import COLUMNAS, COLS_TEXTO, HORAS_BASE_TURNO, HORAS_ALMUERZO, MIN_HORAS_ALMUERZO, WORKSHEET_NAME, WORKSHEET_HORAS_ESPERADAS
+from core.config import COLUMNAS, COLS_TEXTO, HORAS_BASE_TURNO, HORAS_ALMUERZO, MIN_HORAS_ALMUERZO, WORKSHEET_NAME, WORKSHEET_HORAS_ESPERADAS, WORKSHEET_HISTORICO
+from core.time_utils import now_ecuador, parse_fecha_flexible
 
 _SA_KEYS = {
     "type", "project_id", "private_key_id", "private_key",
@@ -131,52 +132,72 @@ def _aplicar_formato_fecha_hora() -> None:
     _datetime_format_applied = True
 
 
+def _valores_a_df(values) -> pd.DataFrame:
+    """Convierte la matriz cruda de una hoja (get_all_values) al DataFrame
+    normalizado de la app: fuerza 'object' en columnas de texto (evita TypeError
+    al escribir strings en columnas float) y normaliza espacios en headers y
+    valores (evita que un ' ' invisible rompa comparaciones == 'Abierto' o ==
+    nombre). Compartido por leer_registros y leer_historico."""
+    if not values:
+        return pd.DataFrame({c: pd.Series(dtype=object) for c in COLUMNAS})
+
+    header = [_normalizar_texto(c) for c in values[0]]
+    rows = values[1:]
+    if rows:
+        ancho = len(header)
+        rows = [r[:ancho] + [""] * max(0, ancho - len(r)) for r in rows]
+        df = pd.DataFrame(rows, columns=header)
+        # Descartar filas completamente vacías. Vectorizado por columna
+        # (mucho más rápido que apply(axis=1) cuando la hoja crece).
+        con_contenido = df.apply(lambda c: c.astype(str).str.strip(), axis=0).ne("").any(axis=1)
+        df = df[con_contenido]
+    else:
+        df = pd.DataFrame(columns=header)
+
+    for col in COLUMNAS:
+        if col not in df.columns:
+            df[col] = ""
+    df = df[COLUMNAS].copy()
+    df = df.astype(object)  # evita StringDtype en pandas 3.x al asignar valores numéricos
+    for col in COLS_TEXTO:
+        df[col] = _normalizar_serie(df[col])
+
+    # Compatibilidad: calcular columnas derivadas en filas antiguas que las tengan vacías.
+    horas_num = pd.to_numeric(df["Horas Trabajadas"], errors="coerce")
+    horas_efect_num = pd.to_numeric(df["Horas Efectivas"], errors="coerce")
+    horas_extra_num = pd.to_numeric(df["Horas Extra"], errors="coerce")
+    mask_falta_efect = horas_num.notna() & horas_efect_num.isna()
+    if mask_falta_efect.any():
+        df.loc[mask_falta_efect, "Horas Efectivas"] = horas_num[mask_falta_efect].apply(calcular_horas_efectivas)
+    mask_falta_extra = horas_num.notna() & horas_extra_num.isna()
+    if mask_falta_extra.any():
+        df.loc[mask_falta_extra, "Horas Extra"] = horas_num[mask_falta_extra].apply(calcular_horas_extra)
+    return df
+
+
 @st.cache_data(ttl=300)
 def leer_registros() -> pd.DataFrame:
-    """Lee la hoja forzando 'object' en columnas de texto (evita TypeError al
-    escribir strings en columnas float) y normalizando espacios en los
-    headers y en los valores de texto (evita que un ' ' invisible en una
-    celda haga fallar las comparaciones == 'Abierto' o == nombre)."""
+    """Lee la hoja activa (Registros) ya normalizada."""
     try:
         ws = _get_worksheet()
-        values = ws.get_all_values()
-        if not values:
-            return pd.DataFrame({c: pd.Series(dtype=object) for c in COLUMNAS})
-
-        header = [_normalizar_texto(c) for c in values[0]]
-        rows = values[1:]
-        if rows:
-            ancho = len(header)
-            rows = [r[:ancho] + [""] * max(0, ancho - len(r)) for r in rows]
-            df = pd.DataFrame(rows, columns=header)
-            # Descartar filas completamente vacías. Vectorizado por columna
-            # (mucho más rápido que apply(axis=1) cuando la hoja crece).
-            con_contenido = df.apply(lambda c: c.astype(str).str.strip(), axis=0).ne("").any(axis=1)
-            df = df[con_contenido]
-        else:
-            df = pd.DataFrame(columns=header)
-
-        for col in COLUMNAS:
-            if col not in df.columns:
-                df[col] = ""
-        df = df[COLUMNAS].copy()
-        df = df.astype(object)  # evita StringDtype en pandas 3.x al asignar valores numéricos
-        for col in COLS_TEXTO:
-            df[col] = _normalizar_serie(df[col])
-
-        # Compatibilidad: calcular columnas derivadas en filas antiguas que las tengan vacías.
-        horas_num = pd.to_numeric(df["Horas Trabajadas"], errors="coerce")
-        horas_efect_num = pd.to_numeric(df["Horas Efectivas"], errors="coerce")
-        horas_extra_num = pd.to_numeric(df["Horas Extra"], errors="coerce")
-        mask_falta_efect = horas_num.notna() & horas_efect_num.isna()
-        if mask_falta_efect.any():
-            df.loc[mask_falta_efect, "Horas Efectivas"] = horas_num[mask_falta_efect].apply(calcular_horas_efectivas)
-        mask_falta_extra = horas_num.notna() & horas_extra_num.isna()
-        if mask_falta_extra.any():
-            df.loc[mask_falta_extra, "Horas Extra"] = horas_num[mask_falta_extra].apply(calcular_horas_extra)
-        return df
+        return _valores_a_df(ws.get_all_values())
     except Exception as e:
         st.error(f"Error leyendo Google Sheets: {type(e).__name__}: {e}")
+        return pd.DataFrame({c: pd.Series(dtype=object) for c in COLUMNAS})
+
+
+@st.cache_data(ttl=300)
+def leer_historico() -> pd.DataFrame:
+    """Lee la hoja de históricos archivados. Si no existe aún, devuelve vacío."""
+    try:
+        sh = _get_worksheet().spreadsheet
+        try:
+            hist = sh.worksheet(WORKSHEET_HISTORICO)
+        except gspread.WorksheetNotFound:
+            return pd.DataFrame({c: pd.Series(dtype=object) for c in COLUMNAS})
+        return _valores_a_df(hist.get_all_values())
+    except Exception as e:
+        st.error(f"Error leyendo histórico: {type(e).__name__}: {e}")
         return pd.DataFrame({c: pd.Series(dtype=object) for c in COLUMNAS})
 
 
@@ -350,6 +371,59 @@ def actualizar_por_entrada(nombre: str, ts_entrada_str: str, cambios: dict) -> b
     return True
 
 
+def actualizar_varios_por_entrada(cambios_por_entrada: list) -> int:
+    """Aplica varios cambios en UNA sola lectura y UNA sola escritura batch.
+
+    Cada elemento de `cambios_por_entrada` es (nombre, ts_entrada_str, cambios),
+    localizado por (Nombre, Timestamp Entrada). Devuelve cuántas filas se
+    actualizaron. Equivale a llamar actualizar_por_entrada en bucle, pero sin
+    releer la hoja completa en cada iteración (esa relectura es lo caro cuando
+    la hoja tiene miles de filas)."""
+    if not cambios_por_entrada:
+        return 0
+    ws = _get_worksheet()
+    _aplicar_formato_fecha_hora()
+    all_values = ws.get_all_values()
+    if len(all_values) < 2:
+        return 0
+
+    header = all_values[0]
+    try:
+        i_nombre = header.index("Nombre")
+        i_entrada = header.index("Timestamp Entrada")
+    except ValueError:
+        return 0
+
+    # Un solo índice (nombre, ts) -> fila, para localizar todas las filas de una vez.
+    indice = {}
+    for offset, row in enumerate(all_values[1:], start=2):
+        if i_nombre >= len(row) or i_entrada >= len(row):
+            continue
+        indice.setdefault((_normalizar_cmp(row[i_nombre]), _ts_key(row[i_entrada])), offset)
+
+    updates = []
+    actualizados = 0
+    for nombre, ts_entrada_str, cambios in cambios_por_entrada:
+        target_row = indice.get((_normalizar_cmp(nombre), _ts_key(ts_entrada_str)))
+        if target_row is None:
+            continue
+        aplico = False
+        for col_name, val in cambios.items():
+            if col_name not in header:
+                continue
+            col_idx = header.index(col_name) + 1
+            a1 = gspread.utils.rowcol_to_a1(target_row, col_idx)
+            updates.append({"range": a1, "values": [[val if val is not None else ""]]})
+            aplico = True
+        if aplico:
+            actualizados += 1
+
+    if updates:
+        ws.batch_update(updates, value_input_option="USER_ENTERED")
+        leer_registros.clear()
+    return actualizados
+
+
 def eliminar_por_entrada(nombre: str, ts_entrada_str: str) -> bool:
     """Elimina la fila que matchea (Nombre, Timestamp Entrada). Devuelve False
     si no existe. Operación destructiva: borra la fila completa de la hoja."""
@@ -382,6 +456,96 @@ def eliminar_por_entrada(nombre: str, ts_entrada_str: str) -> bool:
     ws.delete_rows(target_row)
     leer_registros.clear()
     return True
+
+
+def _agrupar_contiguos(indices: list) -> list:
+    """Agrupa una lista de índices enteros en rangos contiguos (inclusive).
+    [2,3,4,7,8,10] -> [(2,4),(7,8),(10,10)]. Sirve para borrar bloques de filas
+    con la mínima cantidad de llamadas delete_rows."""
+    if not indices:
+        return []
+    indices = sorted(indices)
+    rangos = []
+    ini = prev = indices[0]
+    for x in indices[1:]:
+        if x == prev + 1:
+            prev = x
+        else:
+            rangos.append((ini, prev))
+            ini = prev = x
+    rangos.append((ini, prev))
+    return rangos
+
+
+def _get_worksheet_historico():
+    """Devuelve la hoja de históricos, creándola (con el mismo encabezado que
+    Registros) si aún no existe."""
+    ws = _get_worksheet()
+    sh = ws.spreadsheet
+    try:
+        return sh.worksheet(WORKSHEET_HISTORICO)
+    except gspread.WorksheetNotFound:
+        header = ws.row_values(1)
+        hist = sh.add_worksheet(title=WORKSHEET_HISTORICO, rows=1, cols=max(len(header), 1))
+        if header:
+            hist.update([header], value_input_option="RAW")
+        return hist
+
+
+def archivar_historico(solo_un_mes: bool) -> dict:
+    """Mueve a la hoja Historico las filas 'Completo' con Fecha de Turno anterior
+    al primer día del mes actual. Los turnos 'Abierto'/'Revision' nunca se
+    archivan (quedan pendientes de gestión).
+
+    Copia primero a Historico y solo entonces borra de Registros (si algo falla
+    a mitad, es preferible un duplicado recuperable a una pérdida). El borrado se
+    hace por rangos contiguos, de mayor a menor índice, para no invalidar
+    posiciones ni tocar las filas del mes actual.
+
+    Si `solo_un_mes` es True (uso automático), procede únicamente cuando lo
+    pendiente pertenece a un solo mes calendario; si abarca varios meses (backlog
+    de la primera vez), NO archiva y devuelve bloqueado=True para forzar la
+    limpieza manual. Devuelve {'archivadas': int, 'bloqueado': bool, 'meses': [(a,m)...]}."""
+    ws = _get_worksheet()
+    all_values = ws.get_all_values()
+    if len(all_values) < 2:
+        return {"archivadas": 0, "bloqueado": False, "meses": []}
+
+    header = all_values[0]
+    try:
+        i_estado = header.index("Estado")
+        i_fecha = header.index("Fecha de Turno")
+    except ValueError:
+        return {"archivadas": 0, "bloqueado": False, "meses": []}
+
+    inicio_mes = now_ecuador().date().replace(day=1)
+
+    a_archivar = []  # (row_idx, valores_fila, (año, mes))
+    for offset, row in enumerate(all_values[1:], start=2):
+        if i_estado >= len(row) or _normalizar_cmp(row[i_estado]) != "completo":
+            continue
+        f = parse_fecha_flexible(row[i_fecha]) if i_fecha < len(row) else None
+        if f is None or f >= inicio_mes:
+            continue
+        a_archivar.append((offset, row, (f.year, f.month)))
+
+    if not a_archivar:
+        return {"archivadas": 0, "bloqueado": False, "meses": []}
+
+    meses = sorted({m for _, _, m in a_archivar})
+    if solo_un_mes and len(meses) > 1:
+        return {"archivadas": 0, "bloqueado": True, "meses": meses}
+
+    hist = _get_worksheet_historico()
+    hist.append_rows([r for _, r, _ in a_archivar], value_input_option="USER_ENTERED", table_range="A1")
+
+    indices = [idx for idx, _, _ in a_archivar]
+    for start, end in sorted(_agrupar_contiguos(indices), reverse=True):
+        ws.delete_rows(start, end)
+
+    leer_registros.clear()
+    leer_historico.clear()
+    return {"archivadas": len(a_archivar), "bloqueado": False, "meses": meses}
 
 
 def calcular_horas(ts_in: datetime, ts_out: datetime) -> float:

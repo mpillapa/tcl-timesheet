@@ -12,6 +12,7 @@ COLUMNAS = [
     "Horas Efectivas",
     "Horas Extra",
     "Estado",
+    "Evento",
     "Observaciones",
 ]
 
@@ -22,6 +23,7 @@ COLS_TEXTO = [
     "Timestamp Entrada",
     "Timestamp Salida",
     "Estado",
+    "Evento",
     "Observaciones",
 ]
 
@@ -46,3 +48,7 @@ MIN_JUSTIF_CHARS = 10
 MIN_MINUTOS_TURNO = 5
 
 WORKSHEET_HORAS_ESPERADAS = "Horas Esperadas"
+
+# Hoja donde se archivan los registros de meses cerrados para mantener liviana
+# la hoja activa (Registros).
+WORKSHEET_HISTORICO = "Historico"

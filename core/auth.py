@@ -125,6 +125,8 @@ def logout() -> None:
         "salida_pendiente",
         "auto_logout_started_at",
         "_barrido_olvidados_hecho",
+        "_archivado_auto_hecho",
+        "_archivado_backlog",
     ):
         st.session_state.pop(k, None)
 

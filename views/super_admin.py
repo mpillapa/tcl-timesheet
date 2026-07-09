@@ -5,11 +5,13 @@ from datetime import datetime, date, time, timedelta
 from core.auth import logout, confiar_equipo_ui
 from core.data import (
     leer_registros,
+    leer_historico,
     leer_horas_esperadas,
     append_registro,
     append_registros_batch,
     actualizar_por_entrada,
     eliminar_por_entrada,
+    archivar_historico,
     calcular_horas,
     calcular_horas_efectivas,
     calcular_horas_extra,
@@ -2224,9 +2226,51 @@ def vista_super_admin() -> None:
                 "enviado(s) a revisión."
             )
 
+    # Archivado automático de meses cerrados: una vez por sesión. Solo procede si
+    # lo pendiente es de un único mes (mantenimiento liviano); un backlog de
+    # varios meses se deja para el archivado manual (primera limpieza).
+    if not st.session_state.get("_archivado_auto_hecho"):
+        st.session_state["_archivado_auto_hecho"] = True
+        _res_arch = archivar_historico(solo_un_mes=True)
+        if _res_arch["archivadas"]:
+            set_flash(f"{_res_arch['archivadas']} registro(s) de meses cerrados archivados en 'Historico'.")
+        elif _res_arch["bloqueado"]:
+            st.session_state["_archivado_backlog"] = _res_arch["meses"]
+
+    # Mantenimiento (archivado manual de todo el backlog): solo Manuel.
+    if admin_user == "mpillapa":
+        with st.expander("Mantenimiento: archivar históricos"):
+            st.caption(
+                "Mueve a la hoja 'Historico' los turnos 'Completo' de meses "
+                "anteriores al actual. Los turnos abiertos o en revisión no se "
+                "tocan. Haz un respaldo de la hoja antes de la primera limpieza."
+            )
+            _backlog = st.session_state.get("_archivado_backlog")
+            if _backlog:
+                _meses_txt = ", ".join(f"{a}-{m:02d}" for a, m in _backlog)
+                st.warning(
+                    f"Hay registros de varios meses pendientes de archivar ({_meses_txt}). "
+                    "El archivado automático no los toca; usa el botón para la limpieza inicial."
+                )
+            if st.button("Archivar meses cerrados ahora", type="primary"):
+                if bloquear_doble_click("archivar_hist"):
+                    st.rerun()
+                else:
+                    _res = archivar_historico(solo_un_mes=False)
+                    st.session_state.pop("_archivado_backlog", None)
+                    set_flash(f"{_res['archivadas']} registro(s) archivados en 'Historico'.")
+                    st.rerun()
+
     mostrar_flash()
 
+    incluir_hist = st.checkbox(
+        "Incluir histórico archivado",
+        value=False,
+        help="Lee también la hoja 'Historico' (meses archivados). Es más lento; úsalo solo cuando necesites ver meses antiguos.",
+    )
     df_raw = leer_registros()
+    if incluir_hist:
+        df_raw = pd.concat([df_raw, leer_historico()], ignore_index=True)
     df_scope = _aplicar_scope_admin(df_raw, admin_user)
     df_dash = _preparar_df_dashboard(df_scope)
 

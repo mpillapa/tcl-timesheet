@@ -10,6 +10,7 @@ from core.data import (
     leer_registros,
     append_registro,
     actualizar_por_entrada,
+    actualizar_varios_por_entrada,
     calcular_horas,
     calcular_horas_efectivas,
     calcular_horas_extra,
@@ -244,7 +245,7 @@ def barrer_turnos_olvidados(df) -> int:
     ahora = now_ecuador()
     estado = df["Estado"].astype(str).str.strip().str.lower()
     abiertos = df[estado == "abierto"]
-    marcados = 0
+    cambios = []
     for _, fila in abiertos.iterrows():
         ts_ent = parse_timestamp_flexible(str(fila["Timestamp Entrada"]))
         if ts_ent is None:
@@ -259,13 +260,13 @@ def barrer_turnos_olvidados(df) -> int:
             f"sin salida (inicio {ts_ent.strftime('%Y-%m-%d %H:%M')})."
         )
         obs_nueva = f"{obs_prev} | {tag_revision}" if obs_prev else tag_revision
-        if actualizar_por_entrada(
+        cambios.append((
             str(fila["Nombre"]),
             str(fila["Timestamp Entrada"]),
             {"Estado": ESTADO_REVISION, "Observaciones": obs_nueva},
-        ):
-            marcados += 1
-    return marcados
+        ))
+    # Una sola lectura + una sola escritura batch, sin importar cuántos sean.
+    return actualizar_varios_por_entrada(cambios)
 
 
 def render_formulario_justificacion() -> None:
