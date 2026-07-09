@@ -230,6 +230,44 @@ def marcar_salida(nombre: str) -> None:
     programar_cierre_sesion()
 
 
+def barrer_turnos_olvidados(df) -> int:
+    """Envía a revisión los turnos 'Abierto' con más de UMBRAL_OLVIDO_H horas
+    desde su entrada (olvido de salida).
+
+    A diferencia de marcar_entrada/marcar_salida —que solo actúan cuando el
+    propio empleado vuelve a marcar—, este barrido detecta turnos olvidados sin
+    depender de él. Pensado para ejecutarse al abrir el panel de super admin.
+    Devuelve cuántos turnos marcó. Recibe un df ya leído (leer_registros) para
+    no duplicar la lectura de la hoja."""
+    if df is None or df.empty:
+        return 0
+    ahora = now_ecuador()
+    estado = df["Estado"].astype(str).str.strip().str.lower()
+    abiertos = df[estado == "abierto"]
+    marcados = 0
+    for _, fila in abiertos.iterrows():
+        ts_ent = parse_timestamp_flexible(str(fila["Timestamp Entrada"]))
+        if ts_ent is None:
+            continue
+        if (ahora - ts_ent).total_seconds() / 3600 <= UMBRAL_OLVIDO_H:
+            continue
+        obs_prev = str(fila.get("Observaciones") or "").strip()
+        if obs_prev.lower() == "nan":
+            obs_prev = ""
+        tag_revision = (
+            f"Pendiente revision supervisor: turno > {UMBRAL_OLVIDO_H} h "
+            f"sin salida (inicio {ts_ent.strftime('%Y-%m-%d %H:%M')})."
+        )
+        obs_nueva = f"{obs_prev} | {tag_revision}" if obs_prev else tag_revision
+        if actualizar_por_entrada(
+            str(fila["Nombre"]),
+            str(fila["Timestamp Entrada"]),
+            {"Estado": ESTADO_REVISION, "Observaciones": obs_nueva},
+        ):
+            marcados += 1
+    return marcados
+
+
 def render_formulario_justificacion() -> None:
     """Formulario que aparece cuando una salida excede UMBRAL_HORAS_EXTRA."""
     if "salida_pendiente" not in st.session_state:

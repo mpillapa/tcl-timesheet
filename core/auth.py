@@ -124,6 +124,7 @@ def logout() -> None:
         "usuario", "area", "admin_user", "admin_rol",
         "salida_pendiente",
         "auto_logout_started_at",
+        "_barrido_olvidados_hecho",
     ):
         st.session_state.pop(k, None)
 

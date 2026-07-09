@@ -16,8 +16,8 @@ from core.data import (
     buscar_turno_abierto_idx,
 )
 from core.employees import AREAS, EMPLEADOS_POR_AREA, AREA_DE
-from core.config import UMBRAL_HORAS_EXTRA, TS_FMT, MIN_JUSTIF_CHARS, HORAS_BASE_TURNO
-from core.marcado import guardar_salida
+from core.config import UMBRAL_HORAS_EXTRA, UMBRAL_OLVIDO_H, TS_FMT, MIN_JUSTIF_CHARS, HORAS_BASE_TURNO
+from core.marcado import guardar_salida, barrer_turnos_olvidados
 from core.time_utils import now_ecuador, today_ecuador, parse_timestamp_flexible, parse_fecha_flexible
 from core.ui_utils import bloquear_doble_click, set_flash, mostrar_flash
 
@@ -2211,6 +2211,18 @@ def vista_super_admin() -> None:
 
     with st.expander("Acceso de este equipo"):
         confiar_equipo_ui()
+
+    # Barrido de turnos olvidados: una vez por sesión de panel, envía a revisión
+    # los turnos abiertos con más de UMBRAL_OLVIDO_H h. Cubre el caso en que el
+    # empleado nunca vuelve a marcar (marcar_entrada/salida no se disparan).
+    if not st.session_state.get("_barrido_olvidados_hecho"):
+        st.session_state["_barrido_olvidados_hecho"] = True
+        _n_olv = barrer_turnos_olvidados(leer_registros())
+        if _n_olv:
+            set_flash(
+                f"{_n_olv} turno(s) con más de {UMBRAL_OLVIDO_H} h sin salida "
+                "enviado(s) a revisión."
+            )
 
     mostrar_flash()
 
