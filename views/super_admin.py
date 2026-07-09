@@ -515,29 +515,30 @@ def _filtros_inline(df: pd.DataFrame, areas_permitidas=None) -> pd.DataFrame:
     opciones_sem = [_SEM_TODAS] + list(semanas_iso.keys())
     opciones_mes = [_MES_TODOS] + list(meses.keys())
 
-    # Botones de control
-    c_pop, c_reset = st.columns([1.5, 1])
-    with c_pop:
-        with st.popover("Editar filtros", use_container_width=True):
-            st.selectbox("Mes", opciones_mes, key="filtro_mes")
-            st.selectbox("Semana ISO", opciones_sem, key="filtro_semana_iso")
-            st.date_input(
-                "Rango de fechas",
-                value=(fmin, fmax),
-                min_value=fmin,
-                max_value=fmax,
-                key="filtro_rango",
-                on_change=_clear_quick_filters,
-            )
-            st.multiselect("Área",     areas_disponibles, default=areas_disponibles, key="filtro_area")
-            st.multiselect("Empleado", empleados_disp,    default=empleados_disp,    key="filtro_emp")
-            st.multiselect("Estado",   estados,           default=estados,           key="filtro_est")
-
-    with c_reset:
+    # Filtros en un expander (NO en popover): en Streamlit los desplegables de
+    # selectbox/multiselect dentro de un st.popover a veces no despliegan la
+    # lista (solo dejan escribir); dentro de un expander funcionan bien.
+    _cf1, _cf2 = st.columns([1.5, 1])
+    with _cf2:
         if st.button("Restablecer filtros", use_container_width=True):
             for k in ("filtro_mes", "filtro_semana_iso", "filtro_rango", "filtro_area", "filtro_emp", "filtro_est"):
                 st.session_state.pop(k, None)
             st.rerun()
+
+    with st.expander("Editar filtros", expanded=False):
+        st.selectbox("Mes", opciones_mes, key="filtro_mes")
+        st.selectbox("Semana ISO", opciones_sem, key="filtro_semana_iso")
+        st.date_input(
+            "Rango de fechas",
+            value=(fmin, fmax),
+            min_value=fmin,
+            max_value=fmax,
+            key="filtro_rango",
+            on_change=_clear_quick_filters,
+        )
+        st.multiselect("Área",     areas_disponibles, default=areas_disponibles, key="filtro_area")
+        st.multiselect("Empleado", empleados_disp,    default=empleados_disp,    key="filtro_emp")
+        st.multiselect("Estado",   estados,           default=estados,           key="filtro_est")
 
     # Releer tras renderizar el popover
     semana_key   = st.session_state.get("filtro_semana_iso", _SEM_TODAS)
