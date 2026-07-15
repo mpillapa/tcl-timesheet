@@ -24,29 +24,13 @@ from core.time_utils import now_ecuador, today_ecuador, parse_timestamp_flexible
 from core.ui_utils import bloquear_doble_click, set_flash, mostrar_flash
 
 
-BRAND_NAVY = "#1E2D78"
-BRAND_NAVY_MID = "#3A4BA0"
-BRAND_NAVY_SOFT = "#8A96C9"
-BRAND_RED = "#D8202F"
-BRAND_RED_SOFT = "#F5C4C8"
-BRAND_VAC = "#2F9E8F"  # turquesa para horas de vacaciones
-BRAND_CUOTA = "#C77D00"  # ámbar/dorado para la línea de cuota (meta)
-BRAND_BG_SOFT = "#F4F6FC"
-BRAND_TEXT = "#1B1F3B"
-BRAND_MUTED = "#6B7280"
-
-BRAND_CATEGORICAL = [
-    BRAND_NAVY,
-    BRAND_RED,
-    BRAND_NAVY_MID,
-    "#2F9E8F",
-    "#E08E2B",
-    BRAND_NAVY_SOFT,
-    "#7A5CA6",
-    "#4B5B8F",
-]
-
-BRAND_EVENTO = "#7A5CA6"  # morado para faltas/permisos en el gráfico
+# Paleta de marca compartida con el marcador (única fuente: core/ui_theme).
+from core.ui_theme import (
+    BRAND_NAVY, BRAND_NAVY_MID, BRAND_NAVY_SOFT,
+    BRAND_RED, BRAND_RED_SOFT, BRAND_VAC, BRAND_CUOTA,
+    BRAND_BG_SOFT, BRAND_TEXT, BRAND_MUTED,
+    BRAND_CATEGORICAL, BRAND_EVENTO,
+)
 
 # Tipos de eventualidad y motivos (compartidos por el módulo y la clasificación).
 EVENTO_FALTA = "Justificación de falta"
@@ -486,7 +470,7 @@ def _build_filter_chips_html(
 
 
 def _filtros_inline(df: pd.DataFrame, areas_permitidas=None) -> pd.DataFrame:
-    """Filtros via popover + chips HTML que muestran las selecciones activas."""
+    """Filtros en el sidebar + chips HTML en el cuerpo con las selecciones activas."""
     fechas_validas = df["Fecha de Turno"].dropna()
     fmin = fechas_validas.min() if not fechas_validas.empty else today_ecuador()
     fmax = fechas_validas.max() if not fechas_validas.empty else today_ecuador()
@@ -515,17 +499,11 @@ def _filtros_inline(df: pd.DataFrame, areas_permitidas=None) -> pd.DataFrame:
     opciones_sem = [_SEM_TODAS] + list(semanas_iso.keys())
     opciones_mes = [_MES_TODOS] + list(meses.keys())
 
-    # Filtros en un expander (NO en popover): en Streamlit los desplegables de
-    # selectbox/multiselect dentro de un st.popover a veces no despliegan la
-    # lista (solo dejan escribir); dentro de un expander funcionan bien.
-    _cf1, _cf2 = st.columns([1.5, 1])
-    with _cf2:
-        if st.button("Restablecer filtros", use_container_width=True):
-            for k in ("filtro_mes", "filtro_semana_iso", "filtro_rango", "filtro_area", "filtro_emp", "filtro_est"):
-                st.session_state.pop(k, None)
-            st.rerun()
-
-    with st.expander("Editar filtros", expanded=False):
+    # Filtros en el sidebar: siempre visibles sin empujar el contenido, y los
+    # desplegables funcionan bien (dentro de st.popover a veces no despliegan
+    # la lista — por eso se abandonó ese contenedor).
+    with st.sidebar:
+        st.markdown("## Filtros")
         st.selectbox("Mes", opciones_mes, key="filtro_mes")
         st.selectbox("Semana ISO", opciones_sem, key="filtro_semana_iso")
         st.date_input(
@@ -539,6 +517,10 @@ def _filtros_inline(df: pd.DataFrame, areas_permitidas=None) -> pd.DataFrame:
         st.multiselect("Área",     areas_disponibles, default=areas_disponibles, key="filtro_area")
         st.multiselect("Empleado", empleados_disp,    default=empleados_disp,    key="filtro_emp")
         st.multiselect("Estado",   estados,           default=estados,           key="filtro_est")
+        if st.button("Restablecer filtros", use_container_width=True):
+            for k in ("filtro_mes", "filtro_semana_iso", "filtro_rango", "filtro_area", "filtro_emp", "filtro_est"):
+                st.session_state.pop(k, None)
+            st.rerun()
 
     # Releer tras renderizar el popover
     semana_key   = st.session_state.get("filtro_semana_iso", _SEM_TODAS)
@@ -651,7 +633,7 @@ def _render_dashboard(df: pd.DataFrame) -> None:
         + _kpi_card(
             "", "#FDE7E9", BRAND_RED,
             "En revisión", f"{len(revision):,}", "",
-            "turnos >18h enviados a super admin",
+            f"turnos >{UMBRAL_OLVIDO_H}h enviados a super admin",
         )
         + _kpi_card(
             "", "#FDE7E9", BRAND_RED,
@@ -2188,7 +2170,7 @@ def vista_super_admin() -> None:
     st.title("Marcador de Horas — Panel Administrativo")
 
     iniciales = "".join(p[0] for p in str(usuario).split()[:2]).upper() or "?"
-    ch1, ch2 = st.columns([5, 1])
+    ch1, ch2, ch3 = st.columns([4, 1, 1])
     with ch1:
         st.markdown(
             f"""
@@ -2206,14 +2188,19 @@ def vista_super_admin() -> None:
         )
     with ch2:
         st.write("")
+        if st.button("Actualizar", use_container_width=True, help="Relee los datos de la base ahora mismo"):
+            leer_registros.clear()
+            leer_historico.clear()
+            leer_horas_esperadas.clear()
+            set_flash("Datos actualizados.")
+            st.rerun()
+    with ch3:
+        st.write("")
         if st.button("Cerrar sesión", use_container_width=True):
             logout()
             st.rerun()
 
     st.markdown("<div style='height:14px;'></div>", unsafe_allow_html=True)
-
-    with st.expander("Acceso de este equipo"):
-        confiar_equipo_ui()
 
     # Barrido de turnos olvidados: una vez por sesión de panel, envía a revisión
     # los turnos abiertos con más de UMBRAL_OLVIDO_H h. Cubre el caso en que el
@@ -2238,50 +2225,69 @@ def vista_super_admin() -> None:
         elif _res_arch["bloqueado"]:
             st.session_state["_archivado_backlog"] = _res_arch["meses"]
 
-    # Mantenimiento (archivado manual de todo el backlog): solo Manuel.
-    if admin_user == "mpillapa":
-        with st.expander("Mantenimiento: archivar históricos"):
-            st.caption(
-                "Mueve a la hoja 'Historico' los turnos 'Completo' de meses "
-                "anteriores al actual. Los turnos abiertos o en revisión no se "
-                "tocan. Haz un respaldo de la hoja antes de la primera limpieza."
-            )
-            _backlog = st.session_state.get("_archivado_backlog")
-            if _backlog:
-                _meses_txt = ", ".join(f"{a}-{m:02d}" for a, m in _backlog)
-                st.warning(
-                    f"Hay registros de varios meses pendientes de archivar ({_meses_txt}). "
-                    "El archivado automático no los toca; usa el botón para la limpieza inicial."
-                )
-            if st.button("Archivar meses cerrados ahora", type="primary"):
-                if bloquear_doble_click("archivar_hist"):
-                    st.rerun()
-                else:
-                    _res = archivar_historico(solo_un_mes=False)
-                    st.session_state.pop("_archivado_backlog", None)
-                    set_flash(f"{_res['archivadas']} registro(s) archivados en 'Historico'.")
-                    st.rerun()
-
     mostrar_flash()
 
-    incluir_hist = st.checkbox(
-        "Incluir histórico archivado",
-        value=False,
-        help="Lee también la hoja 'Historico' (meses archivados). Es más lento; úsalo solo cuando necesites ver meses antiguos.",
-    )
+    # Sidebar (parte superior): alcance de datos. Los filtros los agrega
+    # _filtros_inline a continuación y las utilidades van al fondo.
+    with st.sidebar:
+        if areas_permitidas is None:
+            st.caption("Acceso total a todas las áreas.")
+        else:
+            st.caption(f"Áreas habilitadas: {', '.join(sorted(areas_permitidas))}" +
+                       ("  |  Solo lectura" if solo_lectura else ""))
+        incluir_hist = st.checkbox(
+            "Incluir histórico archivado",
+            value=False,
+            help="Incluye también los turnos archivados de meses cerrados.",
+        )
+
     df_raw = leer_registros()
     if incluir_hist:
         df_raw = pd.concat([df_raw, leer_historico()], ignore_index=True)
     df_scope = _aplicar_scope_admin(df_raw, admin_user)
     df_dash = _preparar_df_dashboard(df_scope)
 
-    if areas_permitidas is None:
-        st.caption("Acceso total a todas las áreas.")
-    else:
-        st.caption(f"Áreas habilitadas: {', '.join(sorted(areas_permitidas))}" +
-                   ("  |  Solo lectura" if solo_lectura else ""))
+    # Los turnos en revisión requieren acción de un supervisor: que se vean
+    # de entrada, sin tener que llegar hasta la pestaña de gestión.
+    n_rev = int((df_dash["Estado"] == "Revision").sum())
+    if n_rev:
+        if solo_lectura:
+            st.warning(f"Hay **{n_rev} turno(s) en revisión** pendientes de gestión por un administrador.")
+        else:
+            st.warning(
+                f"Hay **{n_rev} turno(s) en revisión** esperando tu gestión — "
+                "revísalos en la pestaña **Gestión de turnos**."
+            )
 
     df_filt = _filtros_inline(df_dash, areas_permitidas=areas_permitidas)
+
+    # Utilidades al fondo del sidebar, debajo de los filtros.
+    with st.sidebar:
+        st.divider()
+        with st.expander("Acceso de este equipo"):
+            confiar_equipo_ui()
+        if admin_user == "mpillapa":
+            with st.expander("Mantenimiento: archivar históricos"):
+                st.caption(
+                    "Marca como archivados los turnos 'Completo' de meses "
+                    "anteriores al actual (solo cambia una marca en la base; "
+                    "no borra nada). Los turnos abiertos o en revisión no se tocan."
+                )
+                _backlog = st.session_state.get("_archivado_backlog")
+                if _backlog:
+                    _meses_txt = ", ".join(f"{a}-{m:02d}" for a, m in _backlog)
+                    st.warning(
+                        f"Hay registros de varios meses pendientes de archivar ({_meses_txt}). "
+                        "El archivado automático no los toca; usa el botón para la limpieza inicial."
+                    )
+                if st.button("Archivar meses cerrados ahora", type="primary"):
+                    if bloquear_doble_click("archivar_hist"):
+                        st.rerun()
+                    else:
+                        _res = archivar_historico(solo_un_mes=False)
+                        st.session_state.pop("_archivado_backlog", None)
+                        set_flash(f"{_res['archivadas']} registro(s) archivados.")
+                        st.rerun()
 
     if solo_lectura:
         tab_dash, tab_comp, tab_tabla = st.tabs([

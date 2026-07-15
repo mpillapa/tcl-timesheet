@@ -13,6 +13,7 @@ import streamlit as st
 from streamlit_javascript import st_javascript
 
 from core.employees import PIN_A_EMPLEADO, AREA_DE
+from core.ui_theme import inject_kiosk_css, inject_login_css
 
 
 # ---------------------------------------------------------------------------
@@ -180,6 +181,7 @@ def _capa1_gate() -> None:
             st.session_state["gate_via"] = "dispositivo de confianza"
             return
 
+    inject_kiosk_css()
     st.title("Acceso al marcador")
     if ip_browser:
         st.caption(
@@ -214,6 +216,7 @@ def _capa1_gate() -> None:
 # Control Login
 # ---------------------------------------------------------------------------
 def _capa3_login_colaborador() -> None:
+    inject_login_css()
     c1, c2 = st.columns([4, 1])
     with c1:
         st.title("Marcador de Horas")
@@ -247,6 +250,7 @@ def _capa3_login_super_admin() -> None:
     except (KeyError, FileNotFoundError):
         super_admins = {}
 
+    inject_kiosk_css()
     st.title("Administrador")
     if st.button("Volver al Marcador", key="back_colab"):
         st.session_state["rol"] = "colaborador"

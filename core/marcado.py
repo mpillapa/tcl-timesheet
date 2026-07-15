@@ -113,8 +113,8 @@ def marcar_entrada(nombre: str) -> None:
 
             if not actualizado:
                 st.error(
-                    "Se detectó un turno abierto mayor a 18h, pero no se pudo enviarlo a revisión. "
-                    "Recarga la página e intenta nuevamente."
+                    f"Se detectó un turno abierto mayor a {UMBRAL_OLVIDO_H}h, pero no se pudo "
+                    "enviarlo a revisión. Recarga la página e intenta nuevamente."
                 )
                 return
 

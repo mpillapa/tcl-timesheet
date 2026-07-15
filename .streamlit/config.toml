@@ -1,0 +1,8 @@
+[theme]
+# Tema de marca Transoceánica: alinea los widgets nativos de Streamlit
+# (botones primary, checkboxes, sliders, focus) al navy corporativo.
+base = "light"
+primaryColor = "#1E2D78"
+backgroundColor = "#FFFFFF"
+secondaryBackgroundColor = "#F4F6FC"
+textColor = "#1B1F3B"
