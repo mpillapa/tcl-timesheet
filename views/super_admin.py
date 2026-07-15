@@ -839,7 +839,7 @@ def _render_dashboard(df: pd.DataFrame, df_prev: pd.DataFrame = None) -> None:
                 alt.Tooltip("Horas Trabajadas:Q", title="Horas", format=".2f"),
             ],
         )
-        .properties(height=max(220, min(26 * len(orden_heat), 1100)))
+        .properties(height=max(280, min(34 * len(orden_heat), 1700)))
     )
     st.altair_chart(chart_heat, use_container_width=True)
 
@@ -862,7 +862,9 @@ def _render_dashboard(df: pd.DataFrame, df_prev: pd.DataFrame = None) -> None:
     piv = piv.rename(columns={"trabajo": "H_Trab", "vacaciones": "H_Vac", "evento": "H_Evt"})
     agg_emp = piv.reset_index()
     agg_emp["Total Efectivas"] = agg_emp["H_Trab"] + agg_emp["H_Vac"] + agg_emp["H_Evt"]
-    agg_emp = agg_emp.sort_values("Total Efectivas", ascending=False).head(12)
+    # Sin tope de funcionarios: los equipos superan los 10-12 y deben verse
+    # completos. El filtro de área/empleado acota cuando hace falta.
+    agg_emp = agg_emp.sort_values("Total Efectivas", ascending=False)
 
     # Conteo de turnos por clase, por funcionario.
     conteo = comp_tipo.groupby(["Nombre", "_Clase"]).size().unstack(fill_value=0)
@@ -898,6 +900,9 @@ def _render_dashboard(df: pd.DataFrame, df_prev: pd.DataFrame = None) -> None:
         agg_emp["Sobre cuota"] = 0.0
 
     orden_nombres = agg_emp["Nombre"].tolist()
+    # Más alto que el resto de gráficos: con equipos grandes los segmentos
+    # apilados y las etiquetas necesitan espacio vertical para leerse.
+    _ALTO_PROGRESO = 480
     barras = agg_emp.melt(
         id_vars=["Nombre", "Turnos Trabajados", "Dias Vacaciones", "Dias Eventos"],
         value_vars=["Trabajo", "Vacaciones", "Faltas/Permisos", "Sobre cuota"],
@@ -937,7 +942,7 @@ def _render_dashboard(df: pd.DataFrame, df_prev: pd.DataFrame = None) -> None:
                 alt.Tooltip("Dias Eventos:Q", title="Días falta/permiso", format="d"),
             ],
         )
-        .properties(height=360)
+        .properties(height=_ALTO_PROGRESO)
     )
 
     # Etiqueta con el total de horas efectivas encima de cada barra.
@@ -975,10 +980,10 @@ def _render_dashboard(df: pd.DataFrame, df_prev: pd.DataFrame = None) -> None:
             )
         )
         capas += [regla_cuota, etiqueta_cuota]
-        chart_final = alt.layer(*capas).properties(height=360)
+        chart_final = alt.layer(*capas).properties(height=_ALTO_PROGRESO)
         st.altair_chart(chart_final, use_container_width=True)
     else:
-        chart_final = alt.layer(*capas).properties(height=360)
+        chart_final = alt.layer(*capas).properties(height=_ALTO_PROGRESO)
         st.altair_chart(chart_final, use_container_width=True)
         st.caption("Sin cuota definida en 'Horas Esperadas' para los meses del período filtrado.")
 
