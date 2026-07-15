@@ -40,9 +40,11 @@ def inject_kiosk_css() -> None:
     st.markdown(
         f"""
         <style>
+            /* padding-top >= altura del header fijo de Streamlit (~3.75rem);
+               con menos, la tarjeta del usuario queda cortada debajo de él. */
             .block-container {{
                 max-width: 640px !important;
-                padding-top: 1.4rem;
+                padding-top: 4.6rem;
             }}
             h1, h2, h3 {{ color: {BRAND_NAVY}; }}
 
