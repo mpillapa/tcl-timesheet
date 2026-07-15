@@ -179,7 +179,8 @@ def leer_horas_esperadas_sheets() -> pd.DataFrame:
 
     df["Año"] = pd.to_numeric(df.get("año", pd.Series(dtype=object)), errors="coerce")
     df["Mes"] = df.get("mes", pd.Series(dtype=object)).astype(str).str.strip().str.lower().map(meses_num)
-    horas_raw = df.get("horas", pd.Series(dtype=object)).astype(str).str.strip().replace("", pd.NA)
+    horas_raw = df.get("horas", pd.Series(dtype=object)).astype(str).str.strip()
+    horas_raw = horas_raw.str.replace(",", ".", regex=False).replace("", pd.NA)
     df["Horas"] = pd.to_numeric(horas_raw, errors="coerce")
 
     df = df.dropna(subset=["Año", "Mes", "Horas"])

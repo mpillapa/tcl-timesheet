@@ -81,11 +81,18 @@ def _a_fecha(val):
 
 
 def _a_num(val):
-    """'' -> None; numérico/str -> float."""
+    """'' -> None; numérico/str -> float.
+
+    Acepta coma decimal ('9,62'): el Sheet en locale es-EC entregaba así casi
+    todas las horas legacy, y sin esto se migrarían/guardarían como nulas."""
     if val is None or val == "":
         return None
     try:
         return float(val)
+    except (TypeError, ValueError):
+        pass
+    try:
+        return float(str(val).strip().replace(" ", "").replace(",", "."))
     except (TypeError, ValueError):
         return None
 

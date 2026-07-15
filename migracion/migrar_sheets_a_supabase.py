@@ -118,10 +118,14 @@ def main() -> int:
             text("SELECT coalesce(sum(horas_trabajadas), 0) FROM turnos")
         ).scalar()
     import pandas as pd
-    suma_sheet = float(
-        pd.to_numeric(df_reg["Horas Trabajadas"], errors="coerce").fillna(0).sum()
-        + pd.to_numeric(df_hist["Horas Trabajadas"], errors="coerce").fillna(0).sum()
-    )
+
+    def _suma_horas(serie):
+        # Misma normalizacion que _a_num: el Sheet entrega coma decimal (es-EC).
+        s = serie.astype(str).str.strip()
+        s = s.str.replace(" ", "", regex=False).str.replace(",", ".", regex=False)
+        return float(pd.to_numeric(s, errors="coerce").fillna(0).sum())
+
+    suma_sheet = _suma_horas(df_reg["Horas Trabajadas"]) + _suma_horas(df_hist["Horas Trabajadas"])
     print(f"      Base de datos -> activos: {n_act} | archivados: {n_arc}")
     print(f"      Suma de Horas Trabajadas -> Sheet: {suma_sheet:.2f} | Base: {float(suma_db):.2f}")
 
