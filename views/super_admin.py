@@ -469,8 +469,12 @@ def _build_filter_chips_html(
     return '<div class="filter-bar">' + "".join(chips) + count_html + "</div>"
 
 
-def _filtros_inline(df: pd.DataFrame, areas_permitidas=None) -> pd.DataFrame:
-    """Filtros en el sidebar + chips HTML en el cuerpo con las selecciones activas."""
+def _filtros_inline(df: pd.DataFrame, areas_permitidas=None, df_base_prev=None):
+    """Filtros en el sidebar + chips HTML en el cuerpo con las selecciones activas.
+
+    Devuelve (df_filtrado, df_periodo_anterior). `df_base_prev` es el universo
+    sobre el que se busca el período anterior (típicamente activos + histórico,
+    porque el mes previo suele estar archivado); si no se pasa, se usa `df`."""
     fechas_validas = df["Fecha de Turno"].dropna()
     fmin = fechas_validas.min() if not fechas_validas.empty else today_ecuador()
     fmax = fechas_validas.max() if not fechas_validas.empty else today_ecuador()
@@ -568,9 +572,29 @@ def _filtros_inline(df: pd.DataFrame, areas_permitidas=None) -> pd.DataFrame:
         unsafe_allow_html=True,
     )
 
-    return resultado
+    # Período anterior comparable: misma duración inmediatamente antes del rango
+    # activo, con los mismos filtros de área/empleado/estado. Alimenta los deltas
+    # de los KPIs. Solo aplica cuando hay un filtro de fechas activo (con el
+    # rango completo no hay "anterior" que tenga sentido).
+    base_prev = df_base_prev if df_base_prev is not None else df
+    df_prev = base_prev.iloc[0:0]
+    hay_filtro_fechas = (
+        isinstance(rango, tuple) and len(rango) == 2 and all(rango)
+        and (rango[0] != fmin or rango[1] != fmax)
+    )
+    if hay_filtro_fechas:
+        duracion = rango[1] - rango[0]
+        prev_fin = rango[0] - timedelta(days=1)
+        prev_ini = prev_fin - duracion
+        mask_prev = base_prev["Fecha de Turno"].between(prev_ini, prev_fin)
+        mask_prev &= base_prev["Area"].isin(areas_filtro)
+        mask_prev &= base_prev["Nombre"].isin(emp_filtro)
+        mask_prev &= base_prev["Estado"].isin(est_filtro)
+        df_prev = base_prev[mask_prev].copy()
 
-def _render_dashboard(df: pd.DataFrame) -> None:
+    return resultado, df_prev
+
+def _render_dashboard(df: pd.DataFrame, df_prev: pd.DataFrame = None) -> None:
     if df.empty:
         st.info("Sin registros en el rango filtrado.")
         return
@@ -581,6 +605,20 @@ def _render_dashboard(df: pd.DataFrame) -> None:
     total_horas = float(completos["Horas Efectivas"].sum(skipna=True))
     funcionarios_activos = int(completos["Nombre"].nunique())
     promedio_turno = total_horas / len(completos) if len(completos) else 0.0
+
+    # Comparación contra el período anterior de igual duración (mismos filtros
+    # de área/empleado/estado). Sin período anterior, los deltas no se muestran.
+    delta_horas_txt = ""
+    delta_turnos_txt = ""
+    if df_prev is not None and not df_prev.empty:
+        prev_comp = df_prev[df_prev["Estado"] == "Completo"]
+        prev_horas = float(prev_comp["Horas Efectivas"].sum(skipna=True))
+        if prev_horas > 0:
+            d_h = (total_horas - prev_horas) / prev_horas * 100
+            delta_horas_txt = f" · <b>{d_h:+.1f}%</b> vs período anterior"
+        if len(prev_comp) > 0:
+            d_t = (len(completos) - len(prev_comp)) / len(prev_comp) * 100
+            delta_turnos_txt = f" · <b>{d_t:+.1f}%</b> vs período anterior"
 
     # Cuota del período — misma lógica que el gráfico de progreso
     df_esp = leer_horas_esperadas()
@@ -613,7 +651,7 @@ def _render_dashboard(df: pd.DataFrame) -> None:
         + _kpi_card(
             "", "#E6E9F4", BRAND_NAVY,
             "Total horas", f"{total_horas:,.1f}", "h",
-            f"Prom. <b>{promedio_turno:.2f}</b> h/turno",
+            f"Prom. <b>{promedio_turno:.2f}</b> h/turno{delta_horas_txt}",
         )
         + _kpi_card(
             "", "#E6E9F4", BRAND_NAVY,
@@ -623,7 +661,7 @@ def _render_dashboard(df: pd.DataFrame) -> None:
         + _kpi_card(
             "", "#E1F3E7", "#1F9254",
             "Turnos completos", f"{len(completos):,}", "",
-            "con entrada y salida",
+            f"con entrada y salida{delta_turnos_txt}",
         )
         + _kpi_card(
             "", "#FEF3E2", "#C97A0A",
@@ -652,8 +690,64 @@ def _render_dashboard(df: pd.DataFrame) -> None:
         st.caption("Sin turnos completos en el filtro.")
         return
 
+    # Vista agregada por área: los jefes piensan primero en áreas y luego en
+    # personas. Solo tiene sentido cuando el filtro abarca más de una.
+    areas_en_filtro = completos["Area"].dropna()
+    areas_en_filtro = areas_en_filtro[areas_en_filtro != ""]
+    if areas_en_filtro.nunique() > 1:
+        _section_title("Horas por área")
+        agg_area = (
+            completos[completos["Area"].fillna("") != ""]
+            .groupby("Area", dropna=True)
+            .agg(**{
+                "Horas Efectivas": ("Horas Efectivas", "sum"),
+                "Horas Extra": ("Horas Extra", "sum"),
+                "Funcionarios": ("Nombre", "nunique"),
+                "Turnos": ("Nombre", "size"),
+            })
+            .reset_index()
+            .sort_values("Horas Efectivas", ascending=False)
+        )
+        barras_area = agg_area.melt(
+            id_vars=["Area", "Funcionarios", "Turnos"],
+            value_vars=["Horas Efectivas", "Horas Extra"],
+            var_name="Tipo",
+            value_name="Horas",
+        )
+        chart_area = (
+            alt.Chart(barras_area)
+            .mark_bar(cornerRadiusTopRight=4, cornerRadiusBottomRight=4)
+            .encode(
+                y=alt.Y("Area:N", sort=agg_area["Area"].tolist(), title=None),
+                x=alt.X("Horas:Q", title="Horas"),
+                yOffset=alt.YOffset("Tipo:N"),
+                color=alt.Color(
+                    "Tipo:N",
+                    title=None,
+                    scale=alt.Scale(
+                        domain=["Horas Efectivas", "Horas Extra"],
+                        range=[BRAND_NAVY, BRAND_RED],
+                    ),
+                    legend=alt.Legend(orient="top", symbolType="square"),
+                ),
+                tooltip=[
+                    alt.Tooltip("Area:N", title="Área"),
+                    alt.Tooltip("Tipo:N", title="Tipo"),
+                    alt.Tooltip("Horas:Q", title="Horas", format=".1f"),
+                    alt.Tooltip("Funcionarios:Q", title="Funcionarios", format="d"),
+                    alt.Tooltip("Turnos:Q", title="Turnos completos", format="d"),
+                ],
+            )
+            .properties(height=max(160, 52 * len(agg_area)))
+        )
+        st.altair_chart(chart_area, use_container_width=True)
+
     _section_title("Tendencia diaria por funcionario")
-    st.caption("Se muestran los funcionarios con más horas en el período filtrado para facilitar la lectura.")
+    st.caption(
+        "Se muestran los funcionarios con más horas en el período filtrado. "
+        "Haz clic en un nombre de la leyenda para resaltar su línea (clic fuera para restaurar); "
+        "arrastra o usa la rueda del mouse sobre el gráfico para hacer zoom en las fechas."
+    )
 
     top_n = st.slider("Funcionarios en el gráfico", min_value=3, max_value=20, value=8, step=1, key="top_n_func")
 
@@ -672,6 +766,9 @@ def _render_dashboard(df: pd.DataFrame) -> None:
         .sort_values(["Fecha de Turno", "Nombre"])
     )
 
+    # Clic en la leyenda resalta un funcionario y atenúa el resto (soluciona el
+    # "spaghetti" de muchas líneas cruzadas); zoom/arrastre solo en fechas.
+    sel_func = alt.selection_point(fields=["Nombre"], bind="legend")
     chart_lineas = (
         alt.Chart(lineas_df)
         .mark_line(
@@ -688,15 +785,63 @@ def _render_dashboard(df: pd.DataFrame) -> None:
                 scale=alt.Scale(range=BRAND_CATEGORICAL),
                 legend=alt.Legend(orient="bottom", columns=4, symbolType="circle"),
             ),
+            opacity=alt.condition(sel_func, alt.value(1.0), alt.value(0.12)),
             tooltip=[
                 alt.Tooltip("Fecha de Turno:T", title="Fecha", format="%d %b %Y"),
                 alt.Tooltip("Nombre:N", title="Funcionario"),
                 alt.Tooltip("Horas Trabajadas:Q", title="Horas", format=".2f"),
             ],
         )
+        .add_params(sel_func)
         .properties(height=360)
+        .interactive(bind_y=False)
     )
     st.altair_chart(chart_lineas, use_container_width=True)
+
+    _section_title("Mapa de calor: horas por día y funcionario")
+    st.caption(
+        "Cada celda es un día trabajado; a mayor intensidad, más horas. Los tonos "
+        f"rojos superan la jornada base de {HORAS_BASE_TURNO:.0f} h: una fila con "
+        "rojos repetidos concentra horas extra de forma recurrente."
+    )
+    heat_df = (
+        completos.dropna(subset=["Fecha de Turno"])
+        .groupby(["Fecha de Turno", "Nombre"], dropna=True)["Horas Trabajadas"]
+        .sum()
+        .reset_index()
+    )
+    orden_heat = (
+        heat_df.groupby("Nombre")["Horas Trabajadas"]
+        .sum().sort_values(ascending=False).index.tolist()
+    )
+    chart_heat = (
+        alt.Chart(heat_df)
+        .mark_rect(cornerRadius=2, stroke="#FFFFFF", strokeWidth=1)
+        .encode(
+            x=alt.X(
+                "yearmonthdate(Fecha de Turno):O",
+                title="Fecha",
+                axis=alt.Axis(format="%d %b", labelAngle=-45),
+            ),
+            y=alt.Y("Nombre:N", sort=orden_heat, title=None),
+            color=alt.Color(
+                "Horas Trabajadas:Q",
+                title="Horas",
+                scale=alt.Scale(
+                    domain=[0, HORAS_BASE_TURNO, 14],
+                    range=["#EEF2FB", BRAND_NAVY, BRAND_RED],
+                    clamp=True,
+                ),
+            ),
+            tooltip=[
+                alt.Tooltip("Fecha de Turno:T", title="Fecha", format="%d %b %Y"),
+                alt.Tooltip("Nombre:N", title="Funcionario"),
+                alt.Tooltip("Horas Trabajadas:Q", title="Horas", format=".2f"),
+            ],
+        )
+        .properties(height=max(220, min(26 * len(orden_heat), 1100)))
+    )
+    st.altair_chart(chart_heat, use_container_width=True)
 
     _section_title("Progreso de horas por funcionario vs cuota del período")
     st.caption(
@@ -836,37 +981,6 @@ def _render_dashboard(df: pd.DataFrame) -> None:
         chart_final = alt.layer(*capas).properties(height=360)
         st.altair_chart(chart_final, use_container_width=True)
         st.caption("Sin cuota definida en 'Horas Esperadas' para los meses del período filtrado.")
-
-
-def _color_cumpl(val: float) -> str:
-    """Semáforo invertido para el % de cumplimiento.
-
-    0% = verde (lejos del tope), pasa por amarillo a la mitad y llega a rojo al
-    100%. Si SUPERA el 100% se usa un morado sólido distinto, para que "excedido"
-    se distinga de "cerca del límite"."""
-    if pd.isna(val):
-        return ""
-    v = float(val)
-    if v > 100:
-        # Excedido: categoría aparte, color sólido fuera del gradiente.
-        return "background-color: #6A1B9A; color: #FFFFFF; font-weight: 700"
-
-    t = max(0.0, min(v / 100.0, 1.0))
-    verde = (31, 146, 84)     # #1F9254
-    amarillo = (224, 165, 0)  # #E0A500
-    rojo = (216, 32, 47)      # #D8202F (BRAND_RED)
-    if t <= 0.5:
-        u = t / 0.5
-        c0, c1 = verde, amarillo
-    else:
-        u = (t - 0.5) / 0.5
-        c0, c1 = amarillo, rojo
-    r = round(c0[0] + (c1[0] - c0[0]) * u)
-    g = round(c0[1] + (c1[1] - c0[1]) * u)
-    b = round(c0[2] + (c1[2] - c0[2]) * u)
-    lum = 0.299 * r + 0.587 * g + 0.114 * b
-    color_texto = "#FFFFFF" if lum < 140 else "#1B1F3B"
-    return f"background-color: rgb({r},{g},{b}); color: {color_texto}; font-weight: 600"
 
 
 def _render_comparativo_horas(df: pd.DataFrame) -> None:
@@ -1073,18 +1187,31 @@ def _render_comparativo_horas(df: pd.DataFrame) -> None:
         "Turnos Esperados", "Cantidad Turnos", "% Cumplimiento",
     ]].copy()
     tabla_emp = tabla_emp.sort_values("% Cumplimiento")
+    max_pct = float(tabla_emp["% Cumplimiento"].max()) if len(tabla_emp) else 100.0
     st.dataframe(
-        tabla_emp.style
-        .map(_color_cumpl, subset=["% Cumplimiento"])
-        .format({
-            "Horas Efectivas": "{:.1f} h",
-            "Horas Esperadas": "{:.1f} h",
-            "Turnos Esperados": "{:d}",
-            "Cantidad Turnos": "{:d}",
-            "% Cumplimiento": "{:.1f}%",
-        }),
+        tabla_emp,
         use_container_width=True,
         hide_index=True,
+        column_config={
+            "Nombre":           st.column_config.TextColumn("Funcionario", width="medium"),
+            "Horas Efectivas":  st.column_config.NumberColumn("Horas efectivas", format="%.1f h"),
+            "Horas Esperadas":  st.column_config.NumberColumn("Horas esperadas", format="%.1f h"),
+            "Turnos Esperados": st.column_config.NumberColumn("Turnos esperados", format="%d"),
+            "Cantidad Turnos":  st.column_config.NumberColumn("Turnos", format="%d"),
+            "% Cumplimiento":   st.column_config.ProgressColumn(
+                "% Cumplimiento",
+                format="%.1f%%",
+                min_value=0.0,
+                max_value=max(100.0, max_pct),
+            ),
+        },
+    )
+    st.download_button(
+        "Descargar comparativo (CSV)",
+        data=tabla_emp.to_csv(index=False).encode("utf-8-sig"),
+        file_name=f"comparativo_{today_ecuador().isoformat()}.csv",
+        mime="text/csv",
+        use_container_width=True,
     )
 
 
@@ -2259,7 +2386,19 @@ def vista_super_admin() -> None:
                 "revísalos en la pestaña **Gestión de turnos**."
             )
 
-    df_filt = _filtros_inline(df_dash, areas_permitidas=areas_permitidas)
+    # Universo para el "período anterior" de los deltas: incluye el histórico
+    # archivado (el mes previo casi siempre está ahí), sin alterar lo que ve
+    # el usuario en las gráficas.
+    if incluir_hist:
+        df_base_prev = df_dash
+    else:
+        df_base_prev = pd.concat(
+            [df_dash, _preparar_df_dashboard(_aplicar_scope_admin(leer_historico(), admin_user))],
+            ignore_index=True,
+        )
+    df_filt, df_prev = _filtros_inline(
+        df_dash, areas_permitidas=areas_permitidas, df_base_prev=df_base_prev
+    )
 
     # Utilidades al fondo del sidebar, debajo de los filtros.
     with st.sidebar:
@@ -2296,7 +2435,7 @@ def vista_super_admin() -> None:
             "Tabla",
         ])
         with tab_dash:
-            _render_dashboard(df_filt)
+            _render_dashboard(df_filt, df_prev)
         with tab_comp:
             _render_comparativo_horas(df_filt)
         with tab_tabla:
@@ -2310,7 +2449,7 @@ def vista_super_admin() -> None:
             "Eventualidades",
         ])
         with tab_dash:
-            _render_dashboard(df_filt)
+            _render_dashboard(df_filt, df_prev)
         with tab_comp:
             _render_comparativo_horas(df_filt)
         with tab_tabla:
