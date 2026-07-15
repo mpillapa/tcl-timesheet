@@ -4,3 +4,5 @@ pandas
 streamlit-javascript
 streamlit-aggrid
 tzdata
+sqlalchemy
+psycopg2-binary

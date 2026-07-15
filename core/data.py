@@ -1,612 +1,396 @@
-"""Acceso a Google Sheets y utilidades de bajo nivel sobre los registros.
+"""Capa de datos sobre PostgreSQL (Supabase).
 
-Las escrituras (append/update) usan `gspread` a nivel de fila/celda, NO el
-patrón "leer hoja entera → modificar → reescribir hoja entera". Esto evita
-que escrituras concurrentes de distintos usuarios se pisen entre sí.
+La base de datos es la fuente de verdad; Google Sheets queda como espejo de
+respaldo best-effort (ver core.sheets_backup). Este módulo conserva la MISMA
+API pública que la versión sobre Sheets, así que las vistas no cambian:
+
+    leer_registros, leer_historico, leer_horas_esperadas,
+    append_registro, append_registros_batch,
+    actualizar_por_entrada, actualizar_varios_por_entrada,
+    eliminar_por_entrada, archivar_historico,
+    calcular_horas, calcular_horas_efectivas, calcular_horas_extra,
+    buscar_turno_abierto_idx
+
+Los DataFrames devueltos mantienen las 11 columnas en español (COLUMNAS),
+dtype object, timestamps como strings TS_FMT y celdas vacías como "" — igual
+que devolvía la lectura del Sheet, para no romper filtros ni estilos.
+
+El "archivado" dejó de ser una necesidad de rendimiento (Postgres maneja sin
+problema todo el histórico); se conserva como flag booleano para que el panel
+siga separando mes activo vs histórico sin cambios.
 """
 
-from datetime import datetime
-import re
+from datetime import date, datetime
 
-import gspread
 import pandas as pd
 import streamlit as st
+from sqlalchemy import text
 
-from core.config import COLUMNAS, COLS_TEXTO, HORAS_BASE_TURNO, HORAS_ALMUERZO, MIN_HORAS_ALMUERZO, WORKSHEET_NAME, WORKSHEET_HORAS_ESPERADAS, WORKSHEET_HISTORICO
-from core.time_utils import now_ecuador, parse_fecha_flexible
+from core.config import COLUMNAS, TS_FMT
+from core.db import get_engine
+from core.time_utils import now_ecuador, parse_timestamp_flexible, parse_fecha_flexible
+from core import sheets_backup
 
-_SA_KEYS = {
-    "type", "project_id", "private_key_id", "private_key",
-    "client_email", "client_id", "auth_uri", "token_uri",
-    "auth_provider_x509_cert_url", "client_x509_cert_url", "universe_domain",
+# Re-exports para mantener la API que ya importan marcado.py y las vistas.
+from core.calculos import calcular_horas, calcular_horas_efectivas, calcular_horas_extra  # noqa: F401
+from core.normalizacion import _normalizar_texto, _normalizar_cmp, _normalizar_serie  # noqa: F401
+
+
+# Columna de la app (español) -> columna SQL de la tabla turnos.
+_COL_SQL = {
+    "Nombre": "nombre",
+    "Area": "area",
+    "Fecha de Turno": "fecha_turno",
+    "Timestamp Entrada": "ts_entrada",
+    "Timestamp Salida": "ts_salida",
+    "Horas Trabajadas": "horas_trabajadas",
+    "Horas Efectivas": "horas_efectivas",
+    "Horas Extra": "horas_extra",
+    "Estado": "estado",
+    "Evento": "evento",
+    "Observaciones": "observaciones",
 }
-
-_worksheet = None
-_datetime_format_applied = False
-
-
-_INVISIBLE_RE = re.compile(r"[​‌‍⁠﻿]")
+_COLS_TS = {"Timestamp Entrada", "Timestamp Salida"}
+_COLS_NUM = {"Horas Trabajadas", "Horas Efectivas", "Horas Extra"}
+_COLS_FECHA = {"Fecha de Turno"}
 
 
-def _normalizar_texto(value) -> str:
-    """Normaliza textos para comparaciones robustas.
-
-    Elimina caracteres invisibles (zero-width/BOM), compacta espacios y
-    recorta extremos para evitar falsos negativos en comparaciones exactas.
-    """
-    s = str(value or "")
-    s = _INVISIBLE_RE.sub("", s)
-    s = s.replace(" ", " ")
-    s = re.sub(r"\s+", " ", s)
-    return s.strip()
-
-
-def _normalizar_cmp(value) -> str:
-    """Normalización para comparaciones textuales case-insensitive."""
-    return _normalizar_texto(value).casefold()
+# ---------------------------------------------------------------------------
+# Conversión de valores app <-> SQL
+# ---------------------------------------------------------------------------
+def _a_ts(val):
+    """'' -> None; str/datetime -> datetime naive (hora local Ecuador)."""
+    if val is None or isinstance(val, datetime):
+        return val
+    s = _normalizar_texto(val)
+    if not s:
+        return None
+    return parse_timestamp_flexible(s)
 
 
-def _normalizar_serie(serie: pd.Series) -> pd.Series:
-    """Equivalente vectorizado de _normalizar_texto sobre una columna entera.
-
-    Hace el mismo trabajo (quitar invisibles, nbsp->espacio, compactar espacios
-    y recortar) pero con operaciones .str a nivel de columna en vez de aplicar
-    una función Python celda por celda. Importa en hojas grandes: leer_registros
-    procesa todas las filas en cada lectura no cacheada."""
-    s = serie.astype(object).where(serie.notna(), "").astype(str)
-    s = s.str.replace(_INVISIBLE_RE, "", regex=True)
-    s = s.str.replace(" ", " ", regex=False)
-    s = s.str.replace(r"\s+", " ", regex=True)
-    return s.str.strip()
+def _a_fecha(val):
+    """'' -> None; str/date -> date."""
+    if val is None or isinstance(val, date) and not isinstance(val, datetime):
+        return val
+    if isinstance(val, datetime):
+        return val.date()
+    s = _normalizar_texto(val)
+    if not s:
+        return None
+    return parse_fecha_flexible(s)
 
 
-def _get_worksheet():
-    """Devuelve (y cachea) el objeto gspread.Worksheet usado para escrituras
-    atómicas por fila. Usa las mismas credenciales del bloque
-    [connections.gsheets] de secrets."""
-    global _worksheet
-    if _worksheet is not None:
-        return _worksheet
-
-    secrets = st.secrets["connections"]["gsheets"]
-    sa_info = {k: v for k, v in secrets.items() if k in _SA_KEYS}
-    gc = gspread.service_account_from_dict(sa_info)
-
-    spreadsheet_ref = str(secrets["spreadsheet"])
-    sh = gc.open_by_url(spreadsheet_ref) if spreadsheet_ref.startswith("http") else gc.open_by_key(spreadsheet_ref)
-
-    ws_name = secrets.get("worksheet", WORKSHEET_NAME) if hasattr(secrets, "get") else WORKSHEET_NAME
-    _worksheet = sh.worksheet(ws_name)
-    return _worksheet
+def _a_num(val):
+    """'' -> None; numérico/str -> float."""
+    if val is None or val == "":
+        return None
+    try:
+        return float(val)
+    except (TypeError, ValueError):
+        return None
 
 
-def _get_header() -> list:
-    """Devuelve el header real de la hoja sin caché, para evitar desalineaciones
-    si se agregan columnas mientras la app está corriendo."""
-    return _get_worksheet().row_values(1)
+def _valor_sql(col_app: str, val):
+    """Convierte un valor de la app al tipo que espera la columna SQL."""
+    if col_app in _COLS_TS:
+        return _a_ts(val)
+    if col_app in _COLS_FECHA:
+        return _a_fecha(val)
+    if col_app in _COLS_NUM:
+        return _a_num(val)
+    return _normalizar_texto(val)
 
 
-def _aplicar_formato_fecha_hora() -> None:
-    """Aplica formato de fecha/hora a columnas de timestamps en Google Sheets.
+def _fila_a_params(fila: dict) -> dict:
+    """Dict de la app (claves en español) -> params SQL para INSERT."""
+    params = {sql_col: _valor_sql(app_col, fila.get(app_col, "")) for app_col, sql_col in _COL_SQL.items()}
+    # Red de seguridad: fecha_turno es NOT NULL en la tabla. Estado vacío se
+    # preserva tal cual ('' cumple NOT NULL): hay filas legacy con Estado vacío
+    # y "Abierto" en Observaciones que buscar_turno_abierto_idx maneja aparte.
+    if params["fecha_turno"] is None and params["ts_entrada"] is not None:
+        params["fecha_turno"] = params["ts_entrada"].date()
+    return params
 
-    Se ejecuta una sola vez por sesión de app para evitar requests repetitivos.
-    """
-    global _datetime_format_applied
-    if _datetime_format_applied:
+
+def _df_desde_filas(rows) -> pd.DataFrame:
+    """Filas SQL -> DataFrame con el formato legacy exacto de la app:
+    columnas COLUMNAS, dtype object, '' para nulos, timestamps TS_FMT."""
+    datos = {c: [] for c in COLUMNAS}
+    for r in rows:
+        for app_col, sql_col in _COL_SQL.items():
+            v = r[sql_col]
+            if v is None:
+                datos[app_col].append("")
+            elif app_col in _COLS_TS:
+                datos[app_col].append(v.strftime(TS_FMT))
+            elif app_col in _COLS_FECHA:
+                datos[app_col].append(v.strftime("%Y-%m-%d"))
+            elif app_col in _COLS_NUM:
+                datos[app_col].append(float(v))
+            else:
+                datos[app_col].append(str(v))
+    df = pd.DataFrame(datos, columns=COLUMNAS)
+    return df.astype(object)
+
+
+_SELECT_TURNOS = (
+    "SELECT nombre, area, fecha_turno, ts_entrada, ts_salida, "
+    "horas_trabajadas, horas_efectivas, horas_extra, estado, evento, observaciones "
+    "FROM turnos WHERE archivado = :arch ORDER BY ts_entrada, id"
+)
+
+
+def _leer_turnos(archivado: bool) -> pd.DataFrame:
+    with get_engine().connect() as conn:
+        rows = conn.execute(text(_SELECT_TURNOS), {"arch": archivado}).mappings().all()
+    return _df_desde_filas(rows)
+
+
+def _df_vacio() -> pd.DataFrame:
+    return pd.DataFrame({c: pd.Series(dtype=object) for c in COLUMNAS})
+
+
+# ---------------------------------------------------------------------------
+# Espejo de respaldo (best-effort: nunca bloquea la operación principal)
+# ---------------------------------------------------------------------------
+def _espejo(func, *args) -> None:
+    if not sheets_backup.espejo_habilitado():
         return
-
-    ws = _get_worksheet()
-    header = _get_header()
-    requests = []
-
-    def _add_format_request(col_name: str, pattern: str) -> None:
-        if col_name not in header:
-            return
-        col_idx = header.index(col_name)
-        requests.append({
-            "repeatCell": {
-                "range": {
-                    "sheetId": ws.id,
-                    "startRowIndex": 1,
-                    "startColumnIndex": col_idx,
-                    "endColumnIndex": col_idx + 1,
-                },
-                "cell": {
-                    "userEnteredFormat": {
-                        "numberFormat": {
-                            "type": "DATE_TIME",
-                            "pattern": pattern,
-                        }
-                    }
-                },
-                "fields": "userEnteredFormat.numberFormat",
-            }
-        })
-
-    _add_format_request("Fecha de Turno", "yyyy-mm-dd")
-    _add_format_request("Timestamp Entrada", "yyyy-mm-dd hh:mm:ss")
-    _add_format_request("Timestamp Salida", "yyyy-mm-dd hh:mm:ss")
-
-    if requests:
-        ws.spreadsheet.batch_update({"requests": requests})
-    _datetime_format_applied = True
+    try:
+        func(*args)
+    except Exception as e:
+        st.warning(
+            "El dato quedó guardado en la base de datos, pero el respaldo en "
+            f"Google Sheets falló ({type(e).__name__}). Puedes re-sincronizar "
+            "el respaldo más tarde; la operación fue exitosa."
+        )
 
 
-def _valores_a_df(values) -> pd.DataFrame:
-    """Convierte la matriz cruda de una hoja (get_all_values) al DataFrame
-    normalizado de la app: fuerza 'object' en columnas de texto (evita TypeError
-    al escribir strings en columnas float) y normaliza espacios en headers y
-    valores (evita que un ' ' invisible rompa comparaciones == 'Abierto' o ==
-    nombre). Compartido por leer_registros y leer_historico."""
-    if not values:
-        return pd.DataFrame({c: pd.Series(dtype=object) for c in COLUMNAS})
-
-    header = [_normalizar_texto(c) for c in values[0]]
-    rows = values[1:]
-    if rows:
-        ancho = len(header)
-        rows = [r[:ancho] + [""] * max(0, ancho - len(r)) for r in rows]
-        df = pd.DataFrame(rows, columns=header)
-        # Descartar filas completamente vacías. Vectorizado por columna
-        # (mucho más rápido que apply(axis=1) cuando la hoja crece).
-        con_contenido = df.apply(lambda c: c.astype(str).str.strip(), axis=0).ne("").any(axis=1)
-        df = df[con_contenido]
-    else:
-        df = pd.DataFrame(columns=header)
-
-    for col in COLUMNAS:
-        if col not in df.columns:
-            df[col] = ""
-    df = df[COLUMNAS].copy()
-    df = df.astype(object)  # evita StringDtype en pandas 3.x al asignar valores numéricos
-    for col in COLS_TEXTO:
-        df[col] = _normalizar_serie(df[col])
-
-    # Compatibilidad: calcular columnas derivadas en filas antiguas que las tengan vacías.
-    horas_num = pd.to_numeric(df["Horas Trabajadas"], errors="coerce")
-    horas_efect_num = pd.to_numeric(df["Horas Efectivas"], errors="coerce")
-    horas_extra_num = pd.to_numeric(df["Horas Extra"], errors="coerce")
-    mask_falta_efect = horas_num.notna() & horas_efect_num.isna()
-    if mask_falta_efect.any():
-        df.loc[mask_falta_efect, "Horas Efectivas"] = horas_num[mask_falta_efect].apply(calcular_horas_efectivas)
-    mask_falta_extra = horas_num.notna() & horas_extra_num.isna()
-    if mask_falta_extra.any():
-        df.loc[mask_falta_extra, "Horas Extra"] = horas_num[mask_falta_extra].apply(calcular_horas_extra)
-    return df
-
-
+# ---------------------------------------------------------------------------
+# Lecturas
+# ---------------------------------------------------------------------------
 @st.cache_data(ttl=300)
 def leer_registros() -> pd.DataFrame:
-    """Lee la hoja activa (Registros) ya normalizada."""
+    """Turnos activos (no archivados), en orden cronológico de entrada."""
     try:
-        ws = _get_worksheet()
-        return _valores_a_df(ws.get_all_values())
+        return _leer_turnos(archivado=False)
     except Exception as e:
-        st.error(f"Error leyendo Google Sheets: {type(e).__name__}: {e}")
-        return pd.DataFrame({c: pd.Series(dtype=object) for c in COLUMNAS})
+        st.error(f"Error leyendo la base de datos: {type(e).__name__}: {e}")
+        return _df_vacio()
 
 
 @st.cache_data(ttl=300)
 def leer_historico() -> pd.DataFrame:
-    """Lee la hoja de históricos archivados. Si no existe aún, devuelve vacío."""
+    """Turnos archivados (meses cerrados)."""
     try:
-        sh = _get_worksheet().spreadsheet
-        try:
-            hist = sh.worksheet(WORKSHEET_HISTORICO)
-        except gspread.WorksheetNotFound:
-            return pd.DataFrame({c: pd.Series(dtype=object) for c in COLUMNAS})
-        return _valores_a_df(hist.get_all_values())
+        return _leer_turnos(archivado=True)
     except Exception as e:
         st.error(f"Error leyendo histórico: {type(e).__name__}: {e}")
-        return pd.DataFrame({c: pd.Series(dtype=object) for c in COLUMNAS})
-
-
-def append_registro(fila: dict) -> None:
-    """Inserta una fila en posición cronológica según Timestamp Entrada.
-
-    Si el nuevo registro es el más reciente, usa append_row (atómico).
-    Si debe intercalarse entre filas existentes, usa insert_row en la
-    posición correcta para mantener el orden cronológico en la hoja.
-    """
-    ws = _get_worksheet()
-    _aplicar_formato_fecha_hora()
-    all_values = ws.get_all_values()
-    header = all_values[0] if all_values else _get_header()
-    row_values = [fila.get(col, "") for col in header]
-
-    ts_nueva = _ts_key(fila.get("Timestamp Entrada", ""))
-    insert_idx = None
-
-    if ts_nueva and len(all_values) > 1:
-        try:
-            i_entrada = header.index("Timestamp Entrada")
-        except ValueError:
-            i_entrada = None
-
-        if i_entrada is not None:
-            for row_idx, row in enumerate(all_values[1:], start=2):
-                ts_fila = _ts_key(row[i_entrada]) if i_entrada < len(row) else ""
-                if ts_fila and ts_fila > ts_nueva:
-                    insert_idx = row_idx
-                    break
-
-    if insert_idx is not None:
-        ws.insert_row(row_values, index=insert_idx, value_input_option="USER_ENTERED")
-    else:
-        ws.append_row(row_values, value_input_option="USER_ENTERED", table_range="A1")
-    leer_registros.clear()
-
-
-def append_registros_batch(filas: list) -> int:
-    """Inserta varias filas manteniendo el orden cronológico de la hoja, cada
-    una en su posición correcta (no como bloque contiguo).
-
-    Pensado para cargas masivas administrativas (p. ej. un rango de vacaciones).
-    Para cada fila se calcula —sobre la hoja original— la primera fila existente
-    con Timestamp Entrada mayor:
-      - las que no tienen ninguna posterior (caso típico: vacaciones futuras) se
-        agregan TODAS juntas al final en una sola llamada (append_rows);
-      - las que sí deben intercalarse se insertan una a una con insert_row, en
-        orden descendente de índice para que los índices menores no se invaliden
-        y los empates queden cronológicos.
-    Así el caso normal cuesta 1 llamada y solo los rangos retroactivos/intercalados
-    pagan inserciones extra. Devuelve el número de filas insertadas."""
-    if not filas:
-        return 0
-    ws = _get_worksheet()
-    _aplicar_formato_fecha_hora()
-    all_values = ws.get_all_values()
-    header = all_values[0] if all_values else _get_header()
-
-    try:
-        i_entrada = header.index("Timestamp Entrada")
-    except ValueError:
-        i_entrada = None
-
-    # ts de cada fila existente, en orden de hoja (índice 1-based; fila 1 = header)
-    existentes = []
-    for row_idx, row in enumerate(all_values[1:], start=2):
-        ts = _ts_key(row[i_entrada]) if (i_entrada is not None and i_entrada < len(row)) else ""
-        existentes.append((ts, row_idx))
-
-    def _pos_para(ts_nuevo):
-        """Primer índice de hoja cuyo ts existente es > ts_nuevo; None = va al final."""
-        if not ts_nuevo or i_entrada is None:
-            return None
-        for ts, row_idx in existentes:
-            if ts and ts > ts_nuevo:
-                return row_idx
-        return None
-
-    # plan: (insert_idx | None, ts_nuevo, row_values)
-    plan = []
-    for fila in filas:
-        ts_nuevo = _ts_key(fila.get("Timestamp Entrada", ""))
-        row_values = [fila.get(col, "") for col in header]
-        plan.append((_pos_para(ts_nuevo), ts_nuevo, row_values))
-
-    intercaladas = [p for p in plan if p[0] is not None]
-    al_final = [p for p in plan if p[0] is None]
-
-    # Insertar intercaladas de mayor a menor índice (y ts desc para empates).
-    intercaladas.sort(key=lambda p: (p[0], p[1]), reverse=True)
-    for insert_idx, _ts, row_values in intercaladas:
-        ws.insert_row(row_values, index=insert_idx, value_input_option="USER_ENTERED")
-
-    # Las que van al final, todas en una sola llamada y en orden cronológico.
-    if al_final:
-        al_final.sort(key=lambda p: p[1])
-        rows = [p[2] for p in al_final]
-        ws.append_rows(rows, value_input_option="USER_ENTERED", table_range="A1")
-
-    leer_registros.clear()
-    return len(plan)
-
-
-def _ts_key(raw) -> str:
-    """Normaliza un timestamp a 'YYYY-MM-DD HH:MM:SS' para comparar de forma
-    robusta entre:
-      - strings escritos con RAW (formato canónico),
-      - celdas datetime-typed legacy cuyo display depende del locale
-        (ej. '22/4/2026 9:00:00' en es-EC).
-    Si no se puede parsear, devuelve el valor en bruto como fallback.
-    """
-    s = _normalizar_texto(raw)
-    if not s:
-        return ""
-    try:
-        return pd.to_datetime(s).strftime("%Y-%m-%d %H:%M:%S")
-    except Exception:
-        try:
-            return pd.to_datetime(s, dayfirst=True).strftime("%Y-%m-%d %H:%M:%S")
-        except Exception:
-            return s
-
-
-def actualizar_por_entrada(nombre: str, ts_entrada_str: str, cambios: dict) -> bool:
-    """Actualiza SOLO las celdas indicadas en `cambios` de la fila que matchea
-    (Nombre, Timestamp Entrada). Devuelve False si la fila no existe.
-
-    No reescribe el resto de la hoja, así que cualquier marcación concurrente
-    en otras filas se preserva. La clave es estable: ni Nombre ni Timestamp
-    Entrada se modifican nunca tras la creación.
-    """
-    ws = _get_worksheet()
-    _aplicar_formato_fecha_hora()
-    all_values = ws.get_all_values()
-    if len(all_values) < 2:
-        return False
-
-    header = all_values[0]
-    try:
-        i_nombre = header.index("Nombre")
-        i_entrada = header.index("Timestamp Entrada")
-    except ValueError:
-        return False
-
-    nombre_norm = _normalizar_cmp(nombre)
-    key = _ts_key(ts_entrada_str)
-    target_row = None  # índice 1-based en la hoja (fila 1 = header)
-    for offset, row in enumerate(all_values[1:], start=2):
-        if i_nombre >= len(row) or i_entrada >= len(row):
-            continue
-        if _normalizar_cmp(row[i_nombre]) != nombre_norm:
-            continue
-        if _ts_key(row[i_entrada]) == key:
-            target_row = offset
-            break
-    if target_row is None:
-        return False
-
-    updates = []
-    for col_name, val in cambios.items():
-        if col_name not in header:
-            continue
-        col_idx = header.index(col_name) + 1
-        a1 = gspread.utils.rowcol_to_a1(target_row, col_idx)
-        updates.append({"range": a1, "values": [[val if val is not None else ""]]})
-    if updates:
-        ws.batch_update(updates, value_input_option="USER_ENTERED")
-    leer_registros.clear()
-    return True
-
-
-def actualizar_varios_por_entrada(cambios_por_entrada: list) -> int:
-    """Aplica varios cambios en UNA sola lectura y UNA sola escritura batch.
-
-    Cada elemento de `cambios_por_entrada` es (nombre, ts_entrada_str, cambios),
-    localizado por (Nombre, Timestamp Entrada). Devuelve cuántas filas se
-    actualizaron. Equivale a llamar actualizar_por_entrada en bucle, pero sin
-    releer la hoja completa en cada iteración (esa relectura es lo caro cuando
-    la hoja tiene miles de filas)."""
-    if not cambios_por_entrada:
-        return 0
-    ws = _get_worksheet()
-    _aplicar_formato_fecha_hora()
-    all_values = ws.get_all_values()
-    if len(all_values) < 2:
-        return 0
-
-    header = all_values[0]
-    try:
-        i_nombre = header.index("Nombre")
-        i_entrada = header.index("Timestamp Entrada")
-    except ValueError:
-        return 0
-
-    # Un solo índice (nombre, ts) -> fila, para localizar todas las filas de una vez.
-    indice = {}
-    for offset, row in enumerate(all_values[1:], start=2):
-        if i_nombre >= len(row) or i_entrada >= len(row):
-            continue
-        indice.setdefault((_normalizar_cmp(row[i_nombre]), _ts_key(row[i_entrada])), offset)
-
-    updates = []
-    actualizados = 0
-    for nombre, ts_entrada_str, cambios in cambios_por_entrada:
-        target_row = indice.get((_normalizar_cmp(nombre), _ts_key(ts_entrada_str)))
-        if target_row is None:
-            continue
-        aplico = False
-        for col_name, val in cambios.items():
-            if col_name not in header:
-                continue
-            col_idx = header.index(col_name) + 1
-            a1 = gspread.utils.rowcol_to_a1(target_row, col_idx)
-            updates.append({"range": a1, "values": [[val if val is not None else ""]]})
-            aplico = True
-        if aplico:
-            actualizados += 1
-
-    if updates:
-        ws.batch_update(updates, value_input_option="USER_ENTERED")
-        leer_registros.clear()
-    return actualizados
-
-
-def eliminar_por_entrada(nombre: str, ts_entrada_str: str) -> bool:
-    """Elimina la fila que matchea (Nombre, Timestamp Entrada). Devuelve False
-    si no existe. Operación destructiva: borra la fila completa de la hoja."""
-    ws = _get_worksheet()
-    all_values = ws.get_all_values()
-    if len(all_values) < 2:
-        return False
-
-    header = all_values[0]
-    try:
-        i_nombre = header.index("Nombre")
-        i_entrada = header.index("Timestamp Entrada")
-    except ValueError:
-        return False
-
-    nombre_norm = _normalizar_cmp(nombre)
-    key = _ts_key(ts_entrada_str)
-    target_row = None  # índice 1-based en la hoja (fila 1 = header)
-    for offset, row in enumerate(all_values[1:], start=2):
-        if i_nombre >= len(row) or i_entrada >= len(row):
-            continue
-        if _normalizar_cmp(row[i_nombre]) != nombre_norm:
-            continue
-        if _ts_key(row[i_entrada]) == key:
-            target_row = offset
-            break
-    if target_row is None:
-        return False
-
-    ws.delete_rows(target_row)
-    leer_registros.clear()
-    return True
-
-
-def _agrupar_contiguos(indices: list) -> list:
-    """Agrupa una lista de índices enteros en rangos contiguos (inclusive).
-    [2,3,4,7,8,10] -> [(2,4),(7,8),(10,10)]. Sirve para borrar bloques de filas
-    con la mínima cantidad de llamadas delete_rows."""
-    if not indices:
-        return []
-    indices = sorted(indices)
-    rangos = []
-    ini = prev = indices[0]
-    for x in indices[1:]:
-        if x == prev + 1:
-            prev = x
-        else:
-            rangos.append((ini, prev))
-            ini = prev = x
-    rangos.append((ini, prev))
-    return rangos
-
-
-def _get_worksheet_historico():
-    """Devuelve la hoja de históricos, creándola (con el mismo encabezado que
-    Registros) si aún no existe."""
-    ws = _get_worksheet()
-    sh = ws.spreadsheet
-    try:
-        return sh.worksheet(WORKSHEET_HISTORICO)
-    except gspread.WorksheetNotFound:
-        header = ws.row_values(1)
-        hist = sh.add_worksheet(title=WORKSHEET_HISTORICO, rows=1, cols=max(len(header), 1))
-        if header:
-            hist.update([header], value_input_option="RAW")
-        return hist
-
-
-def archivar_historico(solo_un_mes: bool) -> dict:
-    """Mueve a la hoja Historico las filas 'Completo' con Fecha de Turno anterior
-    al primer día del mes actual. Los turnos 'Abierto'/'Revision' nunca se
-    archivan (quedan pendientes de gestión).
-
-    Copia primero a Historico y solo entonces borra de Registros (si algo falla
-    a mitad, es preferible un duplicado recuperable a una pérdida). El borrado se
-    hace por rangos contiguos, de mayor a menor índice, para no invalidar
-    posiciones ni tocar las filas del mes actual.
-
-    Si `solo_un_mes` es True (uso automático), procede únicamente cuando lo
-    pendiente pertenece a un solo mes calendario; si abarca varios meses (backlog
-    de la primera vez), NO archiva y devuelve bloqueado=True para forzar la
-    limpieza manual. Devuelve {'archivadas': int, 'bloqueado': bool, 'meses': [(a,m)...]}."""
-    ws = _get_worksheet()
-    all_values = ws.get_all_values()
-    if len(all_values) < 2:
-        return {"archivadas": 0, "bloqueado": False, "meses": []}
-
-    header = all_values[0]
-    try:
-        i_estado = header.index("Estado")
-        i_fecha = header.index("Fecha de Turno")
-    except ValueError:
-        return {"archivadas": 0, "bloqueado": False, "meses": []}
-
-    inicio_mes = now_ecuador().date().replace(day=1)
-
-    a_archivar = []  # (row_idx, valores_fila, (año, mes))
-    for offset, row in enumerate(all_values[1:], start=2):
-        if i_estado >= len(row) or _normalizar_cmp(row[i_estado]) != "completo":
-            continue
-        f = parse_fecha_flexible(row[i_fecha]) if i_fecha < len(row) else None
-        if f is None or f >= inicio_mes:
-            continue
-        a_archivar.append((offset, row, (f.year, f.month)))
-
-    if not a_archivar:
-        return {"archivadas": 0, "bloqueado": False, "meses": []}
-
-    meses = sorted({m for _, _, m in a_archivar})
-    if solo_un_mes and len(meses) > 1:
-        return {"archivadas": 0, "bloqueado": True, "meses": meses}
-
-    hist = _get_worksheet_historico()
-    hist.append_rows([r for _, r, _ in a_archivar], value_input_option="USER_ENTERED", table_range="A1")
-
-    indices = [idx for idx, _, _ in a_archivar]
-    for start, end in sorted(_agrupar_contiguos(indices), reverse=True):
-        ws.delete_rows(start, end)
-
-    leer_registros.clear()
-    leer_historico.clear()
-    return {"archivadas": len(a_archivar), "bloqueado": False, "meses": meses}
-
-
-def calcular_horas(ts_in: datetime, ts_out: datetime) -> float:
-    return round((ts_out - ts_in).total_seconds() / 3600, 2)
-
-
-def calcular_horas_efectivas(horas_trabajadas: float) -> float:
-    h = float(horas_trabajadas)
-    return round(h - HORAS_ALMUERZO if h >= MIN_HORAS_ALMUERZO else h, 2)
-
-
-def calcular_horas_extra(horas_trabajadas: float) -> float:
-    return round(max(0.0, float(horas_trabajadas) - HORAS_BASE_TURNO), 2)
-
-
-_MESES_NUM = {
-    "enero": 1, "febrero": 2, "marzo": 3, "abril": 4,
-    "mayo": 5, "junio": 6, "julio": 7, "agosto": 8,
-    "septiembre": 9, "octubre": 10, "noviembre": 11, "diciembre": 12,
-}
+        return _df_vacio()
 
 
 @st.cache_data(ttl=300)
 def leer_horas_esperadas() -> pd.DataFrame:
-    """Lee la hoja 'Horas Esperadas' y devuelve un DataFrame con columnas
-    Año (int), Mes (int 1-12), Horas (float). Solo incluye filas con Horas definidas."""
+    """Tabla horas_esperadas -> DataFrame [Año (int), Mes (int), Horas (float)]."""
     try:
-        sh = _get_worksheet().spreadsheet
-        ws = sh.worksheet(WORKSHEET_HORAS_ESPERADAS)
-        values = ws.get_all_values()
-        if len(values) < 2:
-            return pd.DataFrame(columns=["Año", "Mes", "Horas"])
-
-        header = [_normalizar_texto(c).lower() for c in values[0]]
-        rows = values[1:]
-        df = pd.DataFrame(rows, columns=header)
-
-        df["Año"] = pd.to_numeric(df.get("año", pd.Series(dtype=object)), errors="coerce")
-        df["Mes"] = df.get("mes", pd.Series(dtype=object)).astype(str).str.strip().str.lower().map(_MESES_NUM)
-        horas_raw = df.get("horas", pd.Series(dtype=object)).astype(str).str.strip().replace("", pd.NA)
-        df["Horas"] = pd.to_numeric(horas_raw, errors="coerce")
-
-        df = df.dropna(subset=["Año", "Mes", "Horas"])
-        df["Año"] = df["Año"].astype(int)
-        df["Mes"] = df["Mes"].astype(int)
-        return df[["Año", "Mes", "Horas"]].reset_index(drop=True)
+        with get_engine().connect() as conn:
+            rows = conn.execute(
+                text("SELECT anio, mes, horas FROM horas_esperadas ORDER BY anio, mes")
+            ).all()
+        return pd.DataFrame(
+            {"Año": [int(r[0]) for r in rows],
+             "Mes": [int(r[1]) for r in rows],
+             "Horas": [float(r[2]) for r in rows]}
+        )
     except Exception as e:
-        st.warning(f"No se pudo leer la hoja de horas esperadas: {type(e).__name__}: {e}")
+        st.warning(f"No se pudo leer horas esperadas: {type(e).__name__}: {e}")
         return pd.DataFrame(columns=["Año", "Mes", "Horas"])
 
 
+# ---------------------------------------------------------------------------
+# Escrituras
+# ---------------------------------------------------------------------------
+_INSERT_TURNO = text(
+    "INSERT INTO turnos (nombre, area, fecha_turno, ts_entrada, ts_salida, "
+    "horas_trabajadas, horas_efectivas, horas_extra, estado, evento, observaciones) "
+    "VALUES (:nombre, :area, :fecha_turno, :ts_entrada, :ts_salida, "
+    ":horas_trabajadas, :horas_efectivas, :horas_extra, :estado, :evento, :observaciones) "
+    "ON CONFLICT ((lower(nombre)), ts_entrada) DO NOTHING"
+)
+
+
+def append_registro(fila: dict) -> None:
+    """Inserta un turno. El índice único (nombre, ts_entrada) hace que un
+    doble-click que intente duplicar el mismo turno simplemente no inserte."""
+    params = _fila_a_params(fila)
+    if params["ts_entrada"] is None:
+        st.error("No se pudo interpretar el Timestamp Entrada del registro; no se guardó.")
+        return
+    with get_engine().begin() as conn:
+        conn.execute(_INSERT_TURNO, params)
+    leer_registros.clear()
+    _espejo(sheets_backup.espejo_append, fila)
+
+
+def append_registros_batch(filas: list) -> int:
+    """Inserta varios turnos en una sola transacción. Devuelve cuántos se
+    intentaron insertar (los duplicados exactos se omiten silenciosamente)."""
+    if not filas:
+        return 0
+    lote = []
+    for fila in filas:
+        params = _fila_a_params(fila)
+        if params["ts_entrada"] is None:
+            continue
+        lote.append(params)
+    if not lote:
+        return 0
+    with get_engine().begin() as conn:
+        conn.execute(_INSERT_TURNO, lote)
+    leer_registros.clear()
+    _espejo(sheets_backup.espejo_append_batch, filas)
+    return len(lote)
+
+
+def _armar_update(cambios: dict):
+    """(SET sql, params) a partir de un dict de cambios con claves en español.
+    Devuelve (None, None) si ningún cambio aplica a columnas conocidas."""
+    sets = []
+    params = {}
+    for i, (col_app, val) in enumerate(cambios.items()):
+        sql_col = _COL_SQL.get(col_app)
+        if sql_col is None:
+            continue
+        pname = f"v{i}"
+        sets.append(f"{sql_col} = :{pname}")
+        params[pname] = _valor_sql(col_app, val)
+    if not sets:
+        return None, None
+    sets.append("actualizado_en = now()")
+    return ", ".join(sets), params
+
+
+def actualizar_por_entrada(nombre: str, ts_entrada_str: str, cambios: dict) -> bool:
+    """Actualiza SOLO las columnas indicadas en `cambios` de la fila que matchea
+    (Nombre, Timestamp Entrada). Devuelve False si la fila no existe.
+    `cambios` puede incluir un nuevo Timestamp Entrada (edición de turnos):
+    la fila se localiza por el timestamp ORIGINAL."""
+    ts = _a_ts(ts_entrada_str)
+    if ts is None:
+        return False
+    set_sql, params = _armar_update(cambios)
+    if set_sql is None:
+        return False
+    params["w_nombre"] = _normalizar_cmp(nombre)
+    params["w_ts"] = ts
+    with get_engine().begin() as conn:
+        res = conn.execute(
+            text(f"UPDATE turnos SET {set_sql} "
+                 "WHERE lower(nombre) = :w_nombre AND ts_entrada = :w_ts"),
+            params,
+        )
+    if res.rowcount == 0:
+        return False
+    leer_registros.clear()
+    leer_historico.clear()
+    _espejo(sheets_backup.espejo_actualizar, nombre, ts_entrada_str, cambios)
+    return True
+
+
+def actualizar_varios_por_entrada(cambios_por_entrada: list) -> int:
+    """Aplica varios cambios en UNA transacción. Cada elemento es
+    (nombre, ts_entrada_str, cambios). Devuelve cuántas filas se actualizaron."""
+    if not cambios_por_entrada:
+        return 0
+    actualizados = 0
+    with get_engine().begin() as conn:
+        for nombre, ts_entrada_str, cambios in cambios_por_entrada:
+            ts = _a_ts(ts_entrada_str)
+            if ts is None:
+                continue
+            set_sql, params = _armar_update(cambios)
+            if set_sql is None:
+                continue
+            params["w_nombre"] = _normalizar_cmp(nombre)
+            params["w_ts"] = ts
+            res = conn.execute(
+                text(f"UPDATE turnos SET {set_sql} "
+                     "WHERE lower(nombre) = :w_nombre AND ts_entrada = :w_ts"),
+                params,
+            )
+            actualizados += res.rowcount
+    if actualizados:
+        leer_registros.clear()
+        leer_historico.clear()
+        _espejo(sheets_backup.espejo_actualizar_varios, cambios_por_entrada)
+    return actualizados
+
+
+def eliminar_por_entrada(nombre: str, ts_entrada_str: str) -> bool:
+    """Elimina la fila que matchea (Nombre, Timestamp Entrada). Destructivo."""
+    ts = _a_ts(ts_entrada_str)
+    if ts is None:
+        return False
+    with get_engine().begin() as conn:
+        res = conn.execute(
+            text("DELETE FROM turnos WHERE lower(nombre) = :n AND ts_entrada = :t"),
+            {"n": _normalizar_cmp(nombre), "t": ts},
+        )
+    if res.rowcount == 0:
+        return False
+    leer_registros.clear()
+    leer_historico.clear()
+    _espejo(sheets_backup.espejo_eliminar, nombre, ts_entrada_str)
+    return True
+
+
+def archivar_historico(solo_un_mes: bool) -> dict:
+    """Marca como archivados los turnos 'Completo' con Fecha de Turno anterior
+    al primer día del mes actual. 'Abierto'/'Revision' nunca se archivan.
+
+    Si `solo_un_mes` es True (uso automático) y lo pendiente abarca más de un
+    mes calendario, NO archiva y devuelve bloqueado=True (backlog inicial se
+    resuelve manualmente). Devuelve {'archivadas', 'bloqueado', 'meses'}."""
+    inicio_mes = now_ecuador().date().replace(day=1)
+    try:
+        with get_engine().connect() as conn:
+            fechas = conn.execute(
+                text("SELECT fecha_turno FROM turnos "
+                     "WHERE archivado = false AND lower(estado) = 'completo' "
+                     "AND fecha_turno < :corte"),
+                {"corte": inicio_mes},
+            ).scalars().all()
+        if not fechas:
+            return {"archivadas": 0, "bloqueado": False, "meses": []}
+        meses = sorted({(f.year, f.month) for f in fechas})
+        if solo_un_mes and len(meses) > 1:
+            return {"archivadas": 0, "bloqueado": True, "meses": meses}
+
+        with get_engine().begin() as conn:
+            res = conn.execute(
+                text("UPDATE turnos SET archivado = true, actualizado_en = now() "
+                     "WHERE archivado = false AND lower(estado) = 'completo' "
+                     "AND fecha_turno < :corte"),
+                {"corte": inicio_mes},
+            )
+        leer_registros.clear()
+        leer_historico.clear()
+        _espejo(sheets_backup.espejo_archivar)
+        return {"archivadas": res.rowcount, "bloqueado": False, "meses": meses}
+    except Exception as e:
+        st.error(f"Error archivando históricos: {type(e).__name__}: {e}")
+        return {"archivadas": 0, "bloqueado": False, "meses": []}
+
+
+# ---------------------------------------------------------------------------
+# Utilidades sobre DataFrames (sin cambios respecto a la versión Sheets)
+# ---------------------------------------------------------------------------
 def buscar_turno_abierto_idx(df: pd.DataFrame, nombre: str):
     """Devuelve el índice del turno abierto del empleado, o None.
 
     Incluye un fallback para filas legacy que quedaron con "Abierto" en la
     columna Observaciones y Estado vacío, producto de un bug histórico de
-    desalineo de columnas (ya corregido). Sin este fallback esas filas
-    quedarían inmarcables (imposible cerrar el turno). Al cerrarlas, las
-    celdas Estado y Observaciones se sobrescriben con valores correctos, así
-    que la fila se auto-repara en el próximo marcado de salida.
-    """
+    desalineo de columnas (ya corregido)."""
     if df.empty:
         return None
 
