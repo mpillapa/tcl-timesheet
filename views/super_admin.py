@@ -843,6 +843,65 @@ def _render_dashboard(df: pd.DataFrame, df_prev: pd.DataFrame = None) -> None:
     )
     st.altair_chart(chart_heat, use_container_width=True)
 
+    _section_title("Evolución de horas extra")
+    base_extra = completos.dropna(subset=["Fecha de Turno"]).copy()
+    fechas_dt = pd.to_datetime(base_extra["Fecha de Turno"])
+    base_extra["_Semana"] = (fechas_dt - pd.to_timedelta(fechas_dt.dt.weekday, unit="D")).dt.date
+    base_extra["_DiaN"] = fechas_dt.dt.weekday
+
+    col_sem, col_dow = st.columns([3, 2])
+    with col_sem:
+        st.caption("Total de horas extra por semana (cada punto es la semana que inicia ese lunes).")
+        serie_sem = base_extra.groupby("_Semana")["Horas Extra"].sum().reset_index()
+        if len(serie_sem) < 2:
+            st.info("Amplía el filtro a más de una semana para ver la tendencia.")
+        else:
+            base_c = alt.Chart(serie_sem).encode(
+                x=alt.X("_Semana:T", title="Semana", axis=alt.Axis(format="%d %b")),
+                y=alt.Y("Horas Extra:Q", title="Horas extra"),
+                tooltip=[
+                    alt.Tooltip("_Semana:T", title="Semana del", format="%d %b %Y"),
+                    alt.Tooltip("Horas Extra:Q", title="Horas extra", format=".1f"),
+                ],
+            )
+            chart_sem = alt.layer(
+                base_c.mark_area(opacity=0.15, color=BRAND_RED),
+                base_c.mark_line(
+                    color=BRAND_RED,
+                    strokeWidth=2.5,
+                    interpolate="monotone",
+                    point=alt.OverlayMarkDef(size=55, filled=True, color=BRAND_RED,
+                                             stroke="white", strokeWidth=1),
+                ),
+            ).properties(height=300)
+            st.altair_chart(chart_sem, use_container_width=True)
+    with col_dow:
+        st.caption("Promedio de horas extra por turno según el día de la semana.")
+        dias_lbl = ["Lun", "Mar", "Mié", "Jue", "Vie", "Sáb", "Dom"]
+        agg_dow = (
+            base_extra.groupby("_DiaN")
+            .agg(**{"Total": ("Horas Extra", "sum"), "Turnos": ("Horas Extra", "size")})
+            .reset_index()
+        )
+        agg_dow["Promedio"] = (agg_dow["Total"] / agg_dow["Turnos"]).round(2)
+        agg_dow["Día"] = agg_dow["_DiaN"].map(dict(enumerate(dias_lbl)))
+        chart_dow = (
+            alt.Chart(agg_dow)
+            .mark_bar(cornerRadiusTopLeft=4, cornerRadiusTopRight=4, color=BRAND_NAVY)
+            .encode(
+                x=alt.X("Día:N", sort=dias_lbl, title=None, axis=alt.Axis(labelAngle=0)),
+                y=alt.Y("Promedio:Q", title="Horas extra prom. por turno"),
+                tooltip=[
+                    alt.Tooltip("Día:N", title="Día"),
+                    alt.Tooltip("Promedio:Q", title="Prom. por turno", format=".2f"),
+                    alt.Tooltip("Total:Q", title="Total horas extra", format=".1f"),
+                    alt.Tooltip("Turnos:Q", title="Turnos", format="d"),
+                ],
+            )
+            .properties(height=300)
+        )
+        st.altair_chart(chart_dow, use_container_width=True)
+
     _section_title("Progreso de horas por funcionario vs cuota del período")
     st.caption(
         "La barra crece con cada turno: trabajo efectivo en azul, vacaciones en turquesa y "
