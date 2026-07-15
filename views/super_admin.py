@@ -472,9 +472,11 @@ def _build_filter_chips_html(
 def _filtros_inline(df: pd.DataFrame, areas_permitidas=None, df_base_prev=None):
     """Filtros en el sidebar + chips HTML en el cuerpo con las selecciones activas.
 
-    Devuelve (df_filtrado, df_periodo_anterior). `df_base_prev` es el universo
-    sobre el que se busca el período anterior (típicamente activos + histórico,
-    porque el mes previo suele estar archivado); si no se pasa, se usa `df`."""
+    Devuelve (df_filtrado, df_periodo_anterior, df_todos_los_meses).
+    `df_base_prev` es el universo completo (típicamente activos + histórico):
+    sobre él se calculan el período anterior (deltas de KPIs) y la vista de
+    todos los meses (comparativo mensual, que ignora el filtro de fechas).
+    Si no se pasa, se usa `df`."""
     fechas_validas = df["Fecha de Turno"].dropna()
     fmin = fechas_validas.min() if not fechas_validas.empty else today_ecuador()
     fmax = fechas_validas.max() if not fechas_validas.empty else today_ecuador()
@@ -592,7 +594,17 @@ def _filtros_inline(df: pd.DataFrame, areas_permitidas=None, df_base_prev=None):
         mask_prev &= base_prev["Estado"].isin(est_filtro)
         df_prev = base_prev[mask_prev].copy()
 
-    return resultado, df_prev
+    # Universo de todos los meses SIN filtro de fechas (para el comparativo
+    # mensual). El filtro de empleado solo se aplica si el usuario lo redujo
+    # activamente: empleados_disp sale de los datos activos, y aplicarlo
+    # siempre borraría de los meses históricos a quienes ya no marcan hoy.
+    mask_todo = base_prev["Area"].isin(areas_filtro)
+    if bool(emp_sel) and set(emp_sel) != set(empleados_disp):
+        mask_todo &= base_prev["Nombre"].isin(emp_sel)
+    mask_todo &= base_prev["Estado"].isin(est_filtro)
+    df_todo_meses = base_prev[mask_todo].copy()
+
+    return resultado, df_prev, df_todo_meses
 
 def _render_dashboard(df: pd.DataFrame, df_prev: pd.DataFrame = None) -> None:
     if df.empty:
@@ -1047,37 +1059,43 @@ def _render_dashboard(df: pd.DataFrame, df_prev: pd.DataFrame = None) -> None:
         st.caption("Sin cuota definida en 'Horas Esperadas' para los meses del período filtrado.")
 
 
-def _render_comparativo_horas(df: pd.DataFrame) -> None:
+def _render_comparativo_horas(df: pd.DataFrame, df_todo_meses: pd.DataFrame = None) -> None:
     completos = df[df["Estado"] == "Completo"]
     df_esperadas = leer_horas_esperadas()
 
     if df_esperadas.empty:
-        st.info("No hay datos de horas esperadas cargados en la hoja 'Horas Esperadas'.")
+        st.info("No hay horas esperadas cargadas (tabla horas_esperadas en la base).")
         return
-
-    if completos.empty:
-        st.info("Sin turnos completos en el rango filtrado.")
-        return
-
-    comp_mes = completos.copy()
-    comp_mes["Año"] = comp_mes["Fecha de Turno"].apply(lambda d: d.year if pd.notna(d) else None)
-    comp_mes["Mes"] = comp_mes["Fecha de Turno"].apply(lambda d: d.month if pd.notna(d) else None)
-    comp_mes = comp_mes.dropna(subset=["Año", "Mes"])
-    comp_mes["Año"] = comp_mes["Año"].astype(int)
-    comp_mes["Mes"] = comp_mes["Mes"].astype(int)
 
     # ── Gráfico mensual (total equipo) ──────────────────────────────────────
+    # Usa TODOS los meses (activos + histórico) con solo los filtros de área/
+    # empleado/estado: el filtro de fechas NO afecta esta sección, para que la
+    # comparación mensual siempre esté completa.
+    base_meses = df_todo_meses if df_todo_meses is not None else df
+    completos_todo = base_meses[base_meses["Estado"] == "Completo"]
+
+    comp_mes_todo = completos_todo.copy()
+    comp_mes_todo["Año"] = comp_mes_todo["Fecha de Turno"].apply(lambda d: d.year if pd.notna(d) else None)
+    comp_mes_todo["Mes"] = comp_mes_todo["Fecha de Turno"].apply(lambda d: d.month if pd.notna(d) else None)
+    comp_mes_todo = comp_mes_todo.dropna(subset=["Año", "Mes"])
+    comp_mes_todo["Año"] = comp_mes_todo["Año"].astype(int)
+    comp_mes_todo["Mes"] = comp_mes_todo["Mes"].astype(int)
+
     _section_title("Horas esperadas vs efectivas por mes (total equipo)")
-    st.caption("Las horas esperadas se escalan por el número de funcionarios activos cada mes.")
+    st.caption(
+        "Comparativo histórico completo: **ignora el filtro de fechas** (solo aplican "
+        "área y empleado). Las esperadas se escalan por los funcionarios activos de "
+        "cada mes; la columna roja aparece cuando las efectivas superan las esperadas."
+    )
 
     activos_por_mes = (
-        comp_mes.groupby(["Año", "Mes"])["Nombre"]
+        comp_mes_todo.groupby(["Año", "Mes"])["Nombre"]
         .nunique()
         .reset_index()
         .rename(columns={"Nombre": "N_Activos"})
     )
     actual_mes = (
-        comp_mes.groupby(["Año", "Mes"])["Horas Efectivas"]
+        comp_mes_todo.groupby(["Año", "Mes"])["Horas Efectivas"]
         .sum()
         .reset_index()
         .rename(columns={"Horas Efectivas": "Reales"})
@@ -1098,19 +1116,90 @@ def _render_comparativo_horas(df: pd.DataFrame) -> None:
     comp_chart["% Cumplimiento"] = (
         comp_chart["Reales"] / comp_chart["Esperadas"].replace(0, pd.NA) * 100
     ).fillna(0).round(1)
+    # Exceso = horas extra a nivel de equipo: lo efectivo por encima de lo esperado.
+    comp_chart["Exceso"] = (comp_chart["Reales"] - comp_chart["Esperadas"]).clip(lower=0)
 
     comp_chart_visible = comp_chart[comp_chart["N_Activos"] > 0]
 
     if comp_chart_visible.empty:
-        st.info("No hay datos en el período filtrado para comparar con horas esperadas.")
+        st.info("No hay meses con datos para comparar con horas esperadas.")
     else:
+        # ── Insights del comparativo (mismo estilo que los KPI del dashboard) ──
+        hoy = today_ecuador()
+        cc = comp_chart_visible.reset_index(drop=True)
+        es_cerrado = (cc["Año"] < hoy.year) | ((cc["Año"] == hoy.year) & (cc["Mes"] < hoy.month))
+        cerrados = cc[es_cerrado]
+        en_curso = cc[(cc["Año"] == hoy.year) & (cc["Mes"] == hoy.month)]
+
+        cards = []
+        if len(cerrados) >= 1:
+            ult = cerrados.iloc[-1]
+            if len(cerrados) >= 2:
+                prev = cerrados.iloc[-2]
+                dif = float(ult["Exceso"] - prev["Exceso"])
+                pct_txt = f" ({dif / prev['Exceso'] * 100:+.1f}%)" if prev["Exceso"] > 0 else ""
+                if dif < 0:
+                    sub = f"<b>{-dif:,.0f} h reducidas{pct_txt}</b> vs {prev['Periodo']}"
+                    bg, fg = "#E1F3E7", "#1F9254"
+                elif dif > 0:
+                    sub = f"<b>{dif:,.0f} h más{pct_txt}</b> vs {prev['Periodo']}"
+                    bg, fg = "#FDE7E9", BRAND_RED
+                else:
+                    sub = f"sin variación vs {prev['Periodo']}"
+                    bg, fg = "#E6E9F4", BRAND_NAVY
+            else:
+                sub = "sin mes anterior para comparar"
+                bg, fg = "#E6E9F4", BRAND_NAVY
+            cards.append(_kpi_card(
+                "", bg, fg,
+                f"Horas extra {ult['Periodo']} (último mes cerrado)",
+                f"{ult['Exceso']:,.0f}", "h", sub,
+            ))
+
+        exceso_anio = float(cc.loc[cc["Año"] == hoy.year, "Exceso"].sum())
+        n_meses_anio = int((cc["Año"] == hoy.year).sum())
+        cards.append(_kpi_card(
+            "", "#FDE7E9", BRAND_RED,
+            f"Exceso acumulado {hoy.year}",
+            f"{exceso_anio:,.0f}", "h",
+            f"sobre lo esperado, en <b>{n_meses_anio}</b> mes(es) con datos",
+        ))
+
+        if (cc["Exceso"] > 0).any():
+            peor = cc.loc[cc["Exceso"].idxmax()]
+            cards.append(_kpi_card(
+                "", "#FEF3E2", "#C97A0A",
+                "Mes con mayor exceso",
+                f"{peor['Exceso']:,.0f}", "h",
+                f"<b>{peor['Periodo']}</b> · cumplimiento {peor['% Cumplimiento']:.0f}%",
+            ))
+
+        if not en_curso.empty:
+            mc = en_curso.iloc[0]
+            cards.append(_kpi_card(
+                "", "#E6E9F4", BRAND_NAVY,
+                f"Avance {mc['Periodo']} (en curso)",
+                f"{mc['% Cumplimiento']:.0f}", "%",
+                f"<b>{mc['Reales']:,.0f} h</b> de {mc['Esperadas']:,.0f} h esperadas del mes",
+            ))
+
+        st.markdown('<div class="kpi-grid">' + "".join(cards) + "</div>", unsafe_allow_html=True)
+        st.markdown("<div style='height:8px;'></div>", unsafe_allow_html=True)
+
+        # ── Barras: Esperadas / Efectivas / Horas extra (solo si hay exceso) ──
         orden_periodos = comp_chart_visible["Periodo"].tolist()
-        barras_comp = comp_chart_visible.melt(
-            id_vars=["Periodo", "% Cumplimiento", "N_Activos"],
-            value_vars=["Esperadas", "Reales"],
-            var_name="Tipo",
-            value_name="H",
+        barras_comp = (
+            comp_chart_visible
+            .rename(columns={"Reales": "Efectivas", "Exceso": "Horas extra"})
+            .melt(
+                id_vars=["Periodo", "% Cumplimiento", "N_Activos"],
+                value_vars=["Esperadas", "Efectivas", "Horas extra"],
+                var_name="Tipo",
+                value_name="H",
+            )
         )
+        # La columna de horas extra solo se dibuja en los meses donde existe.
+        barras_comp = barras_comp[(barras_comp["Tipo"] != "Horas extra") | (barras_comp["H"] > 0)]
         chart_comp = (
             alt.Chart(barras_comp)
             .mark_bar(cornerRadiusTopLeft=4, cornerRadiusTopRight=4)
@@ -1121,12 +1210,12 @@ def _render_comparativo_horas(df: pd.DataFrame) -> None:
                     "Tipo:N",
                     title=None,
                     scale=alt.Scale(
-                        domain=["Esperadas", "Reales"],
-                        range=[BRAND_NAVY_SOFT, BRAND_NAVY],
+                        domain=["Esperadas", "Efectivas", "Horas extra"],
+                        range=[BRAND_NAVY_SOFT, BRAND_NAVY, BRAND_RED],
                     ),
                     legend=alt.Legend(orient="top", symbolType="square"),
                 ),
-                xOffset=alt.XOffset("Tipo:N"),
+                xOffset=alt.XOffset("Tipo:N", scale=alt.Scale(domain=["Esperadas", "Efectivas", "Horas extra"])),
                 tooltip=[
                     alt.Tooltip("Periodo:N", title="Mes"),
                     alt.Tooltip("Tipo:N", title="Tipo"),
@@ -1141,23 +1230,25 @@ def _render_comparativo_horas(df: pd.DataFrame) -> None:
             .mark_text(baseline="bottom", dy=-4, fontSize=10, fontWeight="bold", color=BRAND_TEXT)
             .encode(
                 x=alt.X("Periodo:N", sort=orden_periodos),
-                xOffset=alt.XOffset("Tipo:N"),
+                xOffset=alt.XOffset("Tipo:N", scale=alt.Scale(domain=["Esperadas", "Efectivas", "Horas extra"])),
                 y=alt.Y("H:Q"),
                 text=alt.Text("H:Q", format=".0f"),
                 detail=alt.Detail("Tipo:N"),
             )
         )
-        st.altair_chart((chart_comp + texto_comp).properties(height=360), use_container_width=True)
+        st.altair_chart((chart_comp + texto_comp).properties(height=380), use_container_width=True)
 
-        max_chips = 6
-        resumen_cols = st.columns(min(len(comp_chart_visible), max_chips))
-        for col, (_, row) in zip(resumen_cols, comp_chart_visible.iterrows()):
-            pct = row["% Cumplimiento"]
-            col.metric(
-                row["Periodo"],
-                f"{row['Reales']:.0f} h",
-                f"{pct:.0f}% de {row['Esperadas']:.0f} h ({int(row['N_Activos'])} func.)",
-            )
+    # El detalle por funcionario (abajo) sí respeta todos los filtros, incluido fechas.
+    if completos.empty:
+        st.info("Sin turnos completos en el rango filtrado para el detalle por funcionario.")
+        return
+
+    comp_mes = completos.copy()
+    comp_mes["Año"] = comp_mes["Fecha de Turno"].apply(lambda d: d.year if pd.notna(d) else None)
+    comp_mes["Mes"] = comp_mes["Fecha de Turno"].apply(lambda d: d.month if pd.notna(d) else None)
+    comp_mes = comp_mes.dropna(subset=["Año", "Mes"])
+    comp_mes["Año"] = comp_mes["Año"].astype(int)
+    comp_mes["Mes"] = comp_mes["Mes"].astype(int)
 
     # ── Detalle por funcionario ──────────────────────────────────────────────
     _section_title("Horas efectivas vs esperadas por funcionario")
@@ -2460,7 +2551,7 @@ def vista_super_admin() -> None:
             [df_dash, _preparar_df_dashboard(_aplicar_scope_admin(leer_historico(), admin_user))],
             ignore_index=True,
         )
-    df_filt, df_prev = _filtros_inline(
+    df_filt, df_prev, df_todo_meses = _filtros_inline(
         df_dash, areas_permitidas=areas_permitidas, df_base_prev=df_base_prev
     )
 
@@ -2501,7 +2592,7 @@ def vista_super_admin() -> None:
         with tab_dash:
             _render_dashboard(df_filt, df_prev)
         with tab_comp:
-            _render_comparativo_horas(df_filt)
+            _render_comparativo_horas(df_filt, df_todo_meses)
         with tab_tabla:
             _render_tabla(df_filt)
     else:
@@ -2515,7 +2606,7 @@ def vista_super_admin() -> None:
         with tab_dash:
             _render_dashboard(df_filt, df_prev)
         with tab_comp:
-            _render_comparativo_horas(df_filt)
+            _render_comparativo_horas(df_filt, df_todo_meses)
         with tab_tabla:
             _render_tabla(df_filt)
         with tab_gestion:
