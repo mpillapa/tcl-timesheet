@@ -20,6 +20,10 @@ cronológica de la fila (eso costaba una lectura completa de la hoja): en el
 respaldo el orden es cosmético y una sola llamada append_row basta.
 """
 
+import logging
+import queue
+import threading
+
 import gspread
 import pandas as pd
 import streamlit as st
@@ -43,6 +47,60 @@ _SA_KEYS = {
 
 _worksheet = None
 _esquema_asegurado = False
+_header_cache = None
+
+logger = logging.getLogger("marcador.espejo")
+
+# Cola + único hilo consumidor para replicar en segundo plano (ver encolar()).
+_cola_espejo = None
+_worker_iniciado = False
+_worker_lock = threading.Lock()
+_espejo_errores = []  # últimos fallos del espejo, para diagnóstico del admin
+
+
+# ---------------------------------------------------------------------------
+# Espejo en segundo plano (asíncrono, best-effort)
+#
+# La marcación NO debe esperar a Google: la escritura crítica ya ocurrió en la
+# base de datos (fuente de verdad) y el Sheet es solo respaldo. Antes, cada
+# marcación bloqueaba ~0.8-2.7 s abriendo gspread y llamando a la API de Sheets.
+# Ahora esas operaciones se encolan y las procesa un ÚNICO hilo daemon:
+#   - un solo consumidor => gspread lo usa siempre el mismo hilo (sin carreras);
+#   - la cola preserva el ORDEN, así operaciones sobre una misma fila (p.ej.
+#     actualizar y luego eliminar) se aplican en el respaldo en el orden correcto.
+# Los fallos se registran (logger + errores_espejo) en lugar de mostrarse al
+# usuario; el respaldo siempre puede re-sincronizarse desde la base.
+# ---------------------------------------------------------------------------
+def _worker_espejo() -> None:
+    while True:
+        func, args = _cola_espejo.get()
+        try:
+            func(*args)
+        except Exception as e:
+            detalle = f"{type(e).__name__}: {e}"
+            logger.warning("Fallo al replicar en Google Sheets (%s): %s", func.__name__, detalle)
+            _espejo_errores.append((now_ecuador().isoformat(timespec="seconds"), func.__name__, detalle))
+            del _espejo_errores[:-20]  # conservar solo los últimos 20
+        finally:
+            _cola_espejo.task_done()
+
+
+def encolar(func, *args) -> None:
+    """Encola una operación de espejo para ejecutarla en segundo plano.
+    Arranca el hilo consumidor la primera vez. No bloquea."""
+    global _cola_espejo, _worker_iniciado
+    with _worker_lock:
+        if _cola_espejo is None:
+            _cola_espejo = queue.Queue()
+        if not _worker_iniciado:
+            threading.Thread(target=_worker_espejo, name="espejo-sheets", daemon=True).start()
+            _worker_iniciado = True
+    _cola_espejo.put((func, args))
+
+
+def errores_espejo() -> list:
+    """Últimos fallos del espejo (más reciente al final), para diagnóstico."""
+    return list(_espejo_errores)
 
 
 def espejo_habilitado() -> bool:
@@ -72,9 +130,14 @@ def _get_worksheet():
 
 
 def _get_header() -> list:
-    """Header real de la hoja sin caché, para evitar desalineaciones si se
-    agregan columnas mientras la app está corriendo."""
-    return _get_worksheet().row_values(1)
+    """Header de la hoja, cacheado tras la primera lectura (o tras asegurar el
+    esquema) para no leer la fila 1 en CADA escritura espejo (~380 ms por
+    llamada). Si se editan las columnas de la hoja manualmente con la app
+    corriendo, basta reiniciar el proceso para refrescarlo."""
+    global _header_cache
+    if _header_cache is None:
+        _header_cache = _get_worksheet().row_values(1)
+    return _header_cache
 
 
 def _asegurar_columnas_esquema() -> None:
@@ -84,7 +147,7 @@ def _asegurar_columnas_esquema() -> None:
     Las escrituras solo persisten columnas presentes en el encabezado real:
     una columna nueva del esquema no se guardaría hasta existir físicamente
     en la hoja."""
-    global _esquema_asegurado
+    global _esquema_asegurado, _header_cache
     if _esquema_asegurado:
         return
     ws = _get_worksheet()
@@ -98,6 +161,8 @@ def _asegurar_columnas_esquema() -> None:
             [{"range": f"{a1_ini}:{a1_fin}", "values": [faltantes]}],
             value_input_option="RAW",
         )
+        header = header + faltantes
+    _header_cache = header  # reutilizado por _get_header (misma lectura)
     _esquema_asegurado = True
 
 

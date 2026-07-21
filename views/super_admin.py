@@ -1898,10 +1898,32 @@ def _dialogo_confirmar_edicion() -> None:
             return True
         return orig.replace(second=0, microsecond=0) != nueva.replace(second=0, microsecond=0)
 
+    # La Fecha de Turno sigue siempre a la fecha de la entrada (regla aplicada en
+    # core.data._con_fecha_turno_derivada). Se muestra aquí para que el admin vea
+    # que corregir la entrada también reubica el turno en los gráficos.
+    fecha_turno_nueva = ts_ent_nueva.date()
+    try:
+        fto_orig_date = (
+            datetime.strptime(payload.get("fecha_turno_orig", ""), "%Y-%m-%d").date()
+            if payload.get("fecha_turno_orig")
+            else None
+        )
+    except ValueError:
+        fto_orig_date = None
+
+    def _fecha_str(d):
+        return d.strftime("%d/%m/%Y") if d else "—"
+
     filas = (
         _fila_cmp("Funcionario", payload["nombre"], payload["nombre"])
         + _fila_cmp("Entrada", _ts_str(ts_ent_orig), _ts_str(ts_ent_nueva), _cambiado(ts_ent_orig, ts_ent_nueva))
         + _fila_cmp("Salida", _ts_str(ts_sal_orig), _ts_str(ts_sal_nueva), _cambiado(ts_sal_orig, ts_sal_nueva))
+        + _fila_cmp(
+            "Fecha de turno",
+            _fecha_str(fto_orig_date),
+            _fecha_str(fecha_turno_nueva),
+            fto_orig_date != fecha_turno_nueva,
+        )
         + _fila_cmp(
             "Horas trabajadas",
             _dec_a_hhmm(h_orig),
@@ -2085,6 +2107,7 @@ def _flujo_editar_turno(emp_corr, df: pd.DataFrame) -> None:
                 st.session_state["_edit_pendiente"] = {
                     "nombre": emp_corr,
                     "ts_entrada_str_orig": ts_entrada_str_orig,
+                    "fecha_turno_orig": str(turno.get("Fecha de Turno", "") or "").strip(),
                     "ts_ent_orig": ts_ent_orig,
                     "ts_sal_orig": ts_sal_orig,
                     "horas_orig": h_orig,

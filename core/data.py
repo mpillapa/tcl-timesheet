@@ -161,16 +161,14 @@ def _df_vacio() -> pd.DataFrame:
 # Espejo de respaldo (best-effort: nunca bloquea la operación principal)
 # ---------------------------------------------------------------------------
 def _espejo(func, *args) -> None:
+    """Encola la réplica de respaldo en Google Sheets para ejecutarla en SEGUNDO
+    PLANO. Antes esto era síncrono y hacía esperar a cada marcación ~0.8-2.7 s
+    por Google; ahora la operación crítica (base de datos) ya terminó y el espejo
+    no bloquea. Los fallos del respaldo se registran en core.sheets_backup
+    (ver errores_espejo) en vez de interrumpir al usuario."""
     if not sheets_backup.espejo_habilitado():
         return
-    try:
-        func(*args)
-    except Exception as e:
-        st.warning(
-            "El dato quedó guardado en la base de datos, pero el respaldo en "
-            f"Google Sheets falló ({type(e).__name__}). Puedes re-sincronizar "
-            "el respaldo más tarde; la operación fue exitosa."
-        )
+    sheets_backup.encolar(func, *args)
 
 
 # ---------------------------------------------------------------------------
@@ -277,14 +275,38 @@ def _armar_update(cambios: dict):
     return ", ".join(sets), params
 
 
+def _con_fecha_turno_derivada(cambios: dict) -> dict:
+    """Regla de negocio: la Fecha de Turno es SIEMPRE la fecha de la ENTRADA.
+
+    Cuando una edición mueve el Timestamp Entrada sin fijar explícitamente la
+    Fecha de Turno, se recalcula aquí a partir de la nueva entrada, para que la
+    fecha con la que los gráficos agrupan (fecha_turno) no quede desfasada
+    respecto a la entrada corregida. Un turno que cruza la medianoche conserva la
+    fecha de la entrada, no la de la salida.
+
+    Devuelve un dict nuevo (no muta el original). Guarda la fecha como texto
+    '%Y-%m-%d' para que el espejo en Sheets reciba el mismo formato que ya usa esa
+    columna; en SQL, _a_fecha vuelve a interpretar ese texto como date."""
+    if "Timestamp Entrada" not in cambios or "Fecha de Turno" in cambios:
+        return cambios
+    ts_ent = _a_ts(cambios["Timestamp Entrada"])
+    if ts_ent is None:
+        return cambios
+    nuevo = dict(cambios)
+    nuevo["Fecha de Turno"] = ts_ent.strftime("%Y-%m-%d")
+    return nuevo
+
+
 def actualizar_por_entrada(nombre: str, ts_entrada_str: str, cambios: dict) -> bool:
     """Actualiza SOLO las columnas indicadas en `cambios` de la fila que matchea
     (Nombre, Timestamp Entrada). Devuelve False si la fila no existe.
     `cambios` puede incluir un nuevo Timestamp Entrada (edición de turnos):
-    la fila se localiza por el timestamp ORIGINAL."""
+    la fila se localiza por el timestamp ORIGINAL. Si cambia la entrada, la Fecha
+    de Turno se recalcula automáticamente (ver _con_fecha_turno_derivada)."""
     ts = _a_ts(ts_entrada_str)
     if ts is None:
         return False
+    cambios = _con_fecha_turno_derivada(cambios)
     set_sql, params = _armar_update(cambios)
     if set_sql is None:
         return False
@@ -309,6 +331,12 @@ def actualizar_varios_por_entrada(cambios_por_entrada: list) -> int:
     (nombre, ts_entrada_str, cambios). Devuelve cuántas filas se actualizaron."""
     if not cambios_por_entrada:
         return 0
+    # Aplica la misma regla de Fecha de Turno que la edición individual, y con la
+    # lista ya derivada tanto el UPDATE como el espejo escriben la fecha correcta.
+    cambios_por_entrada = [
+        (nombre, ts_str, _con_fecha_turno_derivada(cambios))
+        for nombre, ts_str, cambios in cambios_por_entrada
+    ]
     actualizados = 0
     with get_engine().begin() as conn:
         for nombre, ts_entrada_str, cambios in cambios_por_entrada:
