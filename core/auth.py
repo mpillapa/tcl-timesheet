@@ -131,6 +131,15 @@ def logout() -> None:
     ):
         st.session_state.pop(k, None)
 
+    # Los filtros del panel y su espejo persistente se limpian por prefijo: si
+    # quedaran, el siguiente admin que entre en este mismo navegador heredaría la
+    # selección del anterior (incluidos nombres de áreas que no le competen).
+    for k in [
+        k for k in list(st.session_state.keys())
+        if str(k).startswith(("filtro_", "_persist_filtro", "_universo_filtro"))
+    ]:
+        st.session_state.pop(k, None)
+
 
 # ---------------------------------------------------------------------------
 # Capa 1: gate de red

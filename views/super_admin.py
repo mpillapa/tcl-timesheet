@@ -18,7 +18,11 @@ from core.data import (
     buscar_turno_abierto_idx,
 )
 from core.employees import AREAS, EMPLEADOS_POR_AREA, AREA_DE
-from core.config import UMBRAL_HORAS_EXTRA, UMBRAL_OLVIDO_H, TS_FMT, MIN_JUSTIF_CHARS, HORAS_BASE_TURNO
+from core.config import (
+    UMBRAL_HORAS_EXTRA, UMBRAL_OLVIDO_H, TS_FMT, MIN_JUSTIF_CHARS, HORAS_BASE_TURNO,
+    SCOPE_POR_PADRON_VIGENTE,
+)
+from core.normalizacion import _normalizar_cmp, _normalizar_serie
 from core.marcado import guardar_salida, barrer_turnos_olvidados
 from core.time_utils import now_ecuador, today_ecuador, parse_timestamp_flexible, parse_fecha_flexible
 from core.ui_utils import bloquear_doble_click, set_flash, mostrar_flash
@@ -318,14 +322,38 @@ def _get_areas_permitidas(admin_user: str):
     return AREAS_POR_ADMIN.get(admin_user, set())
 
 
+# Padrón indexado por nombre normalizado: los nombres viajan por la base y por
+# Google Sheets, donde pueden llegar con espacios dobles o caracteres invisibles.
+_AREA_POR_NOMBRE_CMP = {_normalizar_cmp(n): a for n, a in AREA_DE.items()}
+
+
+def _area_vigente(df: pd.DataFrame) -> pd.Series:
+    """Área actual de cada turno según el padrón (secrets.empleados).
+
+    El turno guarda el área que el empleado tenía al marcar, así que una
+    reasignación de área dejaba el historial previo fuera del alcance del nuevo
+    jefe. Los nombres ausentes del padrón (ex-empleados) conservan el área con la
+    que se registró el turno. Ver SCOPE_POR_PADRON_VIGENTE en core.config."""
+    del_padron = _normalizar_serie(df["Nombre"]).str.casefold().map(_AREA_POR_NOMBRE_CMP)
+    return del_padron.fillna(df["Area"])
+
+
 def _aplicar_scope_admin(df: pd.DataFrame, admin_user: str) -> pd.DataFrame:
-    """Restringe visualización por áreas según el admin autenticado."""
+    """Restringe visualización por áreas según el admin autenticado.
+
+    Cuando SCOPE_POR_PADRON_VIGENTE está activo, además reescribe la columna
+    "Area" al área vigente del padrón para que el filtro de área, el dashboard y
+    la tabla sean coherentes con el alcance recién aplicado (si no, un turno
+    admitido por padrón volvería a caer fuera del multiselect de Área)."""
     permitidas = _get_areas_permitidas(admin_user)
+    d = df.copy()
+    if d.empty:
+        return d
+    if SCOPE_POR_PADRON_VIGENTE:
+        d["Area"] = _area_vigente(d)
     if permitidas is None:
-        return df.copy()
-    if df.empty:
-        return df.copy()
-    return df[df["Area"].isin(permitidas)].copy()
+        return d
+    return d[d["Area"].isin(permitidas)].copy()
 
 def _preparar_df_dashboard(df: pd.DataFrame) -> pd.DataFrame:
     """Convierte columnas a tipos aptos para análisis/gráficos."""
@@ -422,6 +450,161 @@ def _clear_quick_filters():
     st.session_state["filtro_mes"] = _MES_TODOS
 
 
+# ---------------------------------------------------------------------------
+# Sincronización de filtros con un universo de datos que cambia
+#
+# Streamlit ignora `default=` / `value=` en cuanto la key del widget existe en
+# session_state: manda lo guardado. Los filtros de este panel se siembran con
+# "todo seleccionado", así que sin sincronizar, la selección solo podía ENCOGER.
+# Todo empleado que entraba al universo después del primer render quedaba fuera
+# del filtro y por lo tanto invisible en dashboard, tabla y comparativo, sin
+# ninguna señal de por qué. Se disparaba al menos en tres situaciones reales:
+#   - el empleado marca su primer turno del mes después de que el admin abrió el
+#     panel (frecuente tras el archivado de meses cerrados, que deja
+#     leer_registros() casi vacío al inicio de mes);
+#   - el admin activa y desactiva "Incluir histórico archivado": al desactivarlo
+#     se poda a quien solo tenía turnos archivados y ya no vuelve;
+#   - el admin acota el filtro de Área y luego lo vuelve a abrir: los empleados
+#     de las áreas que quitó no se restauran.
+# ---------------------------------------------------------------------------
+def _sync_seleccion(key: str, opciones: list) -> None:
+    """Mantiene coherente un multiselect sembrado con "todo seleccionado".
+
+    Reglas, en orden:
+      1. Las opciones que ya no existen se podan siempre (Streamlit exige que los
+         valores estén dentro de las opciones).
+      2. Las opciones nuevas entran a la selección SOLO si el admin no había
+         filtrado nada, es decir si la selección abarcaba todo el universo
+         anterior. Así se repara el "todo seleccionado" que se quedaba corto, sin
+         ensanchar por la espalda una selección deliberada de dos o tres personas.
+      3. Si el filtro sí estaba acotado, la elección del admin se respeta tal
+         cual; el chip del encabezado y el diagnóstico del sidebar dejan claro
+         que hay un filtro activo, así que la exclusión es visible, no silenciosa.
+
+    Debe llamarse ANTES de instanciar el widget: escribir en la key después de
+    crearlo lanza excepción. Esta función es la ÚNICA que siembra el valor
+    inicial; los multiselect no llevan `default=` a propósito, porque Streamlit lo
+    ignora en cuanto la key existe y esa asimetría es justo lo que hacía
+    desaparecer empleados del panel."""
+    universo_key = f"_universo_{key}"
+    universo_prev = st.session_state.get(universo_key)
+    st.session_state[universo_key] = list(opciones)
+
+    if key not in st.session_state:
+        st.session_state[key] = list(opciones)   # primer render: todo seleccionado
+        return
+
+    seleccion_prev = list(st.session_state[key])
+
+    if universo_prev is None:
+        # Sesión abierta antes de este cambio: no hay universo con el que
+        # comparar, así que se restablece a todo para reparar una selección que
+        # pudo quedar recortada por el comportamiento anterior.
+        seleccion = set(opciones)
+    elif set(seleccion_prev) >= set(universo_prev):
+        # No había filtro activo: la selección sigue al universo.
+        seleccion = set(seleccion_prev) | set(opciones)
+    else:
+        seleccion = set(seleccion_prev)
+
+    # Se reconstruye siguiendo el orden de `opciones`, lo que además poda lo que
+    # ya no está disponible.
+    resultado = [o for o in opciones if o in seleccion]
+    if resultado != seleccion_prev:
+        st.session_state[key] = resultado
+
+
+_KEYS_FILTROS = (
+    "filtro_hist", "filtro_mes", "filtro_semana_iso", "filtro_rango",
+    "filtro_area", "filtro_emp", "filtro_est",
+)
+
+
+def _restablecer_filtros() -> None:
+    """Borra las selecciones para que los widgets se resiembren con todo.
+
+    También borra los universos y el espejo persistente: sin ellos,
+    _sync_seleccion detecta que la key no existe y deja que el `default=` del
+    widget haga su trabajo."""
+    for k in _KEYS_FILTROS:
+        st.session_state.pop(k, None)
+        st.session_state.pop(f"_universo_{k}", None)
+        st.session_state.pop(f"_persist_{k}", None)
+
+
+# ---------------------------------------------------------------------------
+# Espejo persistente de los filtros
+#
+# Streamlit descarta el estado de un widget cuando un run TERMINA sin haberlo
+# renderizado (SessionState._remove_stale_widgets): al final de cada run se
+# comparan los widgets vistos contra el estado guardado y lo que no apareció se
+# elimina. Basta un st.rerun() o un st.stop() más arriba en el script para que
+# los filtros del sidebar —que se renderizan más abajo— se pierdan y vuelvan a
+# su valor por defecto.
+#
+# Guardar el valor en la propia key del widget no sirve: al compactar el estado
+# se archiva bajo el id del elemento y la limpieza se lo lleva igual. Por eso el
+# espejo usa nombres propios (`_persist_*`) que nunca pertenecen a un widget y
+# que la limpieza no toca.
+# ---------------------------------------------------------------------------
+def _persistir_filtros() -> None:
+    """Copia el estado actual de los filtros al espejo. Llamar DESPUÉS de que los
+    widgets se hayan renderizado, cuando session_state ya tiene sus valores."""
+    for k in _KEYS_FILTROS:
+        if k in st.session_state:
+            st.session_state[f"_persist_{k}"] = st.session_state[k]
+
+
+def _restaurar_filtros_persistidos() -> None:
+    """Devuelve al session_state los filtros que la limpieza de Streamlit borró.
+
+    Llamar al principio del render, ANTES de instanciar cualquier widget de
+    filtro: escribir en la key de un widget ya creado lanza excepción."""
+    for k in _KEYS_FILTROS:
+        if k not in st.session_state and f"_persist_{k}" in st.session_state:
+            st.session_state[k] = st.session_state[f"_persist_{k}"]
+
+
+def _sanear_opcion(key: str, opciones, fallback) -> None:
+    """Descarta el valor guardado de un selectbox si ya no está entre las opciones.
+
+    Las opciones de Mes y Semana ISO se derivan de los datos, así que se mueven:
+    archivar un mes cerrado hace desaparecer su etiqueta. Un selectbox con `key`
+    cuyo valor no está en `options` aborta el render con StreamlitAPIException, y
+    eso deja el panel inutilizable hasta limpiar la sesión."""
+    if key in st.session_state and st.session_state[key] not in opciones:
+        st.session_state[key] = fallback
+
+
+def _sync_rango_fechas(fmin: date, fmax: date) -> None:
+    """Reencuadra el filtro de fechas cuando el universo de datos se mueve.
+
+    Sin esto, una pestaña abierta de un día para otro queda anclada al fmax del
+    momento en que se abrió y deja fuera los turnos nuevos. Si el admin no había
+    tocado el rango (coincide con el universo anterior) se estira al nuevo; si lo
+    eligió a mano se respeta, solo recortado a los límites válidos del widget
+    para no romper el date_input."""
+    universo_prev = st.session_state.get("_universo_filtro_rango")
+    st.session_state["_universo_filtro_rango"] = (fmin, fmax)
+
+    if "filtro_rango" not in st.session_state:
+        st.session_state["filtro_rango"] = (fmin, fmax)   # primer render
+        return
+
+    actual = st.session_state.get("filtro_rango")
+    if not (isinstance(actual, (tuple, list)) and len(actual) == 2 and all(actual)):
+        return
+    ini, fin = actual[0], actual[1]
+
+    if universo_prev is None or (ini, fin) == tuple(universo_prev):
+        nuevo = (fmin, fmax)
+    else:
+        nuevo = (min(max(ini, fmin), fmax), max(min(fin, fmax), fmin))
+
+    if nuevo != (ini, fin):
+        st.session_state["filtro_rango"] = nuevo
+
+
 def _build_filter_chips_html(
     rango, fmin, fmax,
     areas_sel, areas_disponibles,
@@ -469,6 +652,80 @@ def _build_filter_chips_html(
     return '<div class="filter-bar">' + "".join(chips) + count_html + "</div>"
 
 
+def _personal_asignado(areas_permitidas) -> list:
+    """Nombres del padrón (secrets.empleados) que caen en el alcance del admin.
+
+    Se resuelve contra el padrón y no contra los turnos: un empleado asignado
+    existe para su jefe aunque todavía no haya marcado nada."""
+    if areas_permitidas is None:
+        return sorted(AREA_DE.keys())
+    return sorted(n for n, a in AREA_DE.items() if a in areas_permitidas)
+
+
+def _render_diagnostico_visibilidad(df_dash: pd.DataFrame, df_filt: pd.DataFrame,
+                                    areas_permitidas) -> None:
+    """Explica, empleado por empleado, por qué alguien asignado no aparece.
+
+    El alcance por área y los filtros del sidebar se combinan de forma poco
+    obvia: sin esto, un empleado ausente de las gráficas es indistinguible de un
+    empleado que simplemente no hizo horas extra, y el admin no tiene manera de
+    saber cuál de los dos casos está viendo."""
+    asignados = _personal_asignado(areas_permitidas)
+    if not asignados:
+        st.caption("No tienes personal asignado en el padrón.")
+        return
+
+    def _nombres(d: pd.DataFrame) -> set:
+        if d.empty or "Nombre" not in d.columns:
+            return set()
+        return set(_normalizar_serie(d["Nombre"]).str.casefold())
+
+    en_universo = _nombres(df_dash)
+    en_vista = _nombres(df_filt)
+    seleccionados = {_normalizar_cmp(e) for e in (st.session_state.get("filtro_emp") or [])}
+
+    filas = []
+    for nombre in asignados:
+        clave = _normalizar_cmp(nombre)
+        if clave in en_vista:
+            estado = "Visible"
+        elif clave not in en_universo:
+            estado = "Sin turnos cargados"
+        elif clave not in seleccionados:
+            estado = "Excluido por el filtro Empleado"
+        else:
+            estado = "Fuera del rango o estado filtrado"
+        filas.append({
+            "Empleado": nombre,
+            "Área": AREA_DE.get(nombre, ""),
+            "Estado": estado,
+        })
+
+    df_diag = pd.DataFrame(filas)
+    faltantes = df_diag[df_diag["Estado"] != "Visible"]
+    n_vis = len(df_diag) - len(faltantes)
+
+    st.caption(f"{n_vis} de {len(df_diag)} personas asignadas tienen turnos en la vista actual.")
+    if faltantes.empty:
+        st.success("Todo tu personal aparece en la vista actual.")
+        return
+
+    st.dataframe(
+        faltantes,
+        use_container_width=True,
+        hide_index=True,
+        height=min(280, 45 + 35 * len(faltantes)),
+    )
+    st.caption(
+        "«Sin turnos cargados» puede significar que sus turnos ya fueron archivados: "
+        "activa «Incluir histórico archivado» más arriba."
+    )
+    if st.button("Ver a todo mi personal", use_container_width=True,
+                 help="Restablece los filtros del sidebar y vuelve a mostrar a todos"):
+        _restablecer_filtros()
+        st.rerun()
+
+
 def _filtros_inline(df: pd.DataFrame, areas_permitidas=None, df_base_prev=None):
     """Filtros en el sidebar + chips HTML en el cuerpo con las selecciones activas.
 
@@ -481,8 +738,22 @@ def _filtros_inline(df: pd.DataFrame, areas_permitidas=None, df_base_prev=None):
     fmin = fechas_validas.min() if not fechas_validas.empty else today_ecuador()
     fmax = fechas_validas.max() if not fechas_validas.empty else today_ecuador()
 
-    areas_disponibles = AREAS if areas_permitidas is None else [a for a in AREAS if a in areas_permitidas]
+    if areas_permitidas is None:
+        # Acceso total: se suman las áreas que aparecen en los datos pero ya no
+        # están en el padrón (áreas cerradas, turnos de ex-empleados). Sin esto
+        # quedaban fuera del multiselect y sus turnos resultaban invisibles
+        # incluso para un admin con acceso total. A un admin restringido NO se le
+        # amplía la lista: sus áreas son un permiso, no un reflejo de los datos.
+        extra = sorted(set(df["Area"].dropna().astype(str)) - set(AREAS) - {""})
+        areas_disponibles = list(AREAS) + extra
+    else:
+        areas_disponibles = [a for a in AREAS if a in areas_permitidas]
     estados = ["Completo", "Abierto", "Revision"]
+
+    # Sincronizar antes de instanciar los widgets: si el universo creció, las
+    # opciones nuevas entran a la selección (ver _sync_seleccion).
+    _sync_rango_fechas(fmin, fmax)
+    _sync_seleccion("filtro_area", areas_disponibles)
 
     # Leer áreas activas primero para restringir el listado de empleados
     cur_areas = st.session_state.get("filtro_area", areas_disponibles)
@@ -492,11 +763,8 @@ def _filtros_inline(df: pd.DataFrame, areas_permitidas=None, df_base_prev=None):
         df[df["Area"].isin(areas_activas)]["Nombre"].dropna().unique().tolist()
     )
 
-    # Limpiar empleados fuera del área activa
-    cur_emp_raw = st.session_state.get("filtro_emp", empleados_disp)
-    cur_emp = [e for e in cur_emp_raw if e in empleados_disp]
-    if cur_emp != cur_emp_raw:
-        st.session_state["filtro_emp"] = cur_emp
+    _sync_seleccion("filtro_emp", empleados_disp)
+    _sync_seleccion("filtro_est", estados)
 
     semanas_iso  = _iso_week_options(df)
     meses        = _month_options(df)
@@ -505,27 +773,33 @@ def _filtros_inline(df: pd.DataFrame, areas_permitidas=None, df_base_prev=None):
     opciones_sem = [_SEM_TODAS] + list(semanas_iso.keys())
     opciones_mes = [_MES_TODOS] + list(meses.keys())
 
+    _sanear_opcion("filtro_mes", opciones_mes, _MES_TODOS)
+    _sanear_opcion("filtro_semana_iso", opciones_sem, _SEM_TODAS)
+
     # Filtros en el sidebar: siempre visibles sin empujar el contenido, y los
     # desplegables funcionan bien (dentro de st.popover a veces no despliegan
     # la lista — por eso se abandonó ese contenedor).
+    #
+    # Los multiselect y el rango NO llevan default=/value=: su estado inicial lo
+    # siembran _sync_seleccion y _sync_rango_fechas, que además lo mantienen al
+    # día cuando el universo de datos cambia. Pasar ambas cosas dejaba dos dueños
+    # del mismo valor, con Streamlit ignorando el default en silencio.
     with st.sidebar:
         st.markdown("## Filtros")
         st.selectbox("Mes", opciones_mes, key="filtro_mes")
         st.selectbox("Semana ISO", opciones_sem, key="filtro_semana_iso")
         st.date_input(
             "Rango de fechas",
-            value=(fmin, fmax),
             min_value=fmin,
             max_value=fmax,
             key="filtro_rango",
             on_change=_clear_quick_filters,
         )
-        st.multiselect("Área",     areas_disponibles, default=areas_disponibles, key="filtro_area")
-        st.multiselect("Empleado", empleados_disp,    default=empleados_disp,    key="filtro_emp")
-        st.multiselect("Estado",   estados,           default=estados,           key="filtro_est")
+        st.multiselect("Área",     areas_disponibles, key="filtro_area")
+        st.multiselect("Empleado", empleados_disp,    key="filtro_emp")
+        st.multiselect("Estado",   estados,           key="filtro_est")
         if st.button("Restablecer filtros", use_container_width=True):
-            for k in ("filtro_mes", "filtro_semana_iso", "filtro_rango", "filtro_area", "filtro_emp", "filtro_est"):
-                st.session_state.pop(k, None)
+            _restablecer_filtros()
             st.rerun()
 
     # Releer tras renderizar el popover
@@ -535,6 +809,10 @@ def _filtros_inline(df: pd.DataFrame, areas_permitidas=None, df_base_prev=None):
     areas_sel    = st.session_state.get("filtro_area", areas_disponibles)
     emp_sel      = st.session_state.get("filtro_emp",  empleados_disp)
     est_sel      = st.session_state.get("filtro_est",  estados)
+
+    # Los widgets ya se renderizaron y session_state tiene sus valores: se copian
+    # al espejo para que sobrevivan a un st.rerun() posterior.
+    _persistir_filtros()
 
     # Prioridad de fechas: semana ISO > mes > rango manual
     # No se intenta escribir en el widget date_input desde callbacks (no funciona de forma fiable)
@@ -584,22 +862,28 @@ def _filtros_inline(df: pd.DataFrame, areas_permitidas=None, df_base_prev=None):
         isinstance(rango, tuple) and len(rango) == 2 and all(rango)
         and (rango[0] != fmin or rango[1] != fmax)
     )
+    # El filtro de empleado se aplica al período anterior solo si el usuario lo
+    # redujo activamente, por el mismo motivo que en df_todo_meses (más abajo):
+    # empleados_disp sale de los datos del período visible, así que aplicarlo
+    # siempre borraría del período anterior a quien trabajó entonces y no ha
+    # vuelto a marcar, inflando los deltas de los KPIs.
+    emp_reducido = bool(emp_sel) and set(emp_sel) != set(empleados_disp)
+
     if hay_filtro_fechas:
         duracion = rango[1] - rango[0]
         prev_fin = rango[0] - timedelta(days=1)
         prev_ini = prev_fin - duracion
         mask_prev = base_prev["Fecha de Turno"].between(prev_ini, prev_fin)
         mask_prev &= base_prev["Area"].isin(areas_filtro)
-        mask_prev &= base_prev["Nombre"].isin(emp_filtro)
+        if emp_reducido:
+            mask_prev &= base_prev["Nombre"].isin(emp_sel)
         mask_prev &= base_prev["Estado"].isin(est_filtro)
         df_prev = base_prev[mask_prev].copy()
 
     # Universo de todos los meses SIN filtro de fechas (para el comparativo
-    # mensual). El filtro de empleado solo se aplica si el usuario lo redujo
-    # activamente: empleados_disp sale de los datos activos, y aplicarlo
-    # siempre borraría de los meses históricos a quienes ya no marcan hoy.
+    # mensual), con el mismo criterio de empleado que el período anterior.
     mask_todo = base_prev["Area"].isin(areas_filtro)
-    if bool(emp_sel) and set(emp_sel) != set(empleados_disp):
+    if emp_reducido:
         mask_todo &= base_prev["Nombre"].isin(emp_sel)
     mask_todo &= base_prev["Estado"].isin(est_filtro)
     df_todo_meses = base_prev[mask_todo].copy()
@@ -1615,7 +1899,10 @@ def _render_correcciones(areas_permitidas=None, df_filt=None) -> None:
         st.warning("No tienes áreas habilitadas para realizar correcciones.")
         return
 
-    df_actual = leer_registros()
+    # Mismo criterio de alcance que el dashboard (área vigente del padrón), para
+    # que un turno en revisión no quede sin dueño cuando el empleado cambió de
+    # área después de marcarlo.
+    df_actual = _aplicar_scope_admin(leer_registros(), st.session_state.get("admin_user", ""))
 
     # --- Tabla de turnos pendientes ---
     st.markdown("#### Turnos pendientes de corrección")
@@ -2470,6 +2757,10 @@ def vista_super_admin() -> None:
     areas_permitidas = _get_areas_permitidas(admin_user)
     solo_lectura = _es_solo_lectura(admin_user)
 
+    # Antes de instanciar cualquier widget: recupera los filtros que la limpieza
+    # de widgets obsoletos de Streamlit se llevó en el run anterior.
+    _restaurar_filtros_persistidos()
+
     _inject_brand_css()
 
     st.title("Marcador de Horas — Panel Administrativo")
@@ -2498,7 +2789,11 @@ def vista_super_admin() -> None:
             leer_historico.clear()
             leer_horas_esperadas.clear()
             set_flash("Datos actualizados.")
-            st.rerun()
+            # Sin st.rerun(): las lecturas de más abajo ya usan el caché vacío en
+            # este mismo run, así que relanzar el script no aporta nada y sí
+            # rompe: cortaría antes de renderizar los filtros del sidebar y
+            # Streamlit los descartaría, devolviéndolos a su valor por defecto.
+            # El mensaje lo muestra mostrar_flash() unas líneas más abajo.
     with ch3:
         st.write("")
         if st.button("Cerrar sesión", use_container_width=True):
@@ -2540,9 +2835,12 @@ def vista_super_admin() -> None:
         else:
             st.caption(f"Áreas habilitadas: {', '.join(sorted(areas_permitidas))}" +
                        ("  |  Solo lectura" if solo_lectura else ""))
+        # Con `key` explícita el estado entra al espejo persistente y sobrevive a
+        # un rerun que corte antes de este punto (antes se reseteaba a False).
+        st.session_state.setdefault("filtro_hist", False)
         incluir_hist = st.checkbox(
             "Incluir histórico archivado",
-            value=False,
+            key="filtro_hist",
             help="Incluye también los turnos archivados de meses cerrados.",
         )
 
@@ -2581,6 +2879,8 @@ def vista_super_admin() -> None:
     # Utilidades al fondo del sidebar, debajo de los filtros.
     with st.sidebar:
         st.divider()
+        with st.expander("¿No ves a alguien de tu equipo?"):
+            _render_diagnostico_visibilidad(df_dash, df_filt, areas_permitidas)
         with st.expander("Acceso de este equipo"):
             confiar_equipo_ui()
         if admin_user == "mpillapa":
