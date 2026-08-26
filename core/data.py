@@ -27,7 +27,7 @@ import streamlit as st
 from sqlalchemy import text
 
 from core.config import COLUMNAS, TS_FMT
-from core.db import get_engine
+from core.db import get_engine, reintento_de_lectura
 from core.time_utils import now_ecuador, parse_timestamp_flexible, parse_fecha_flexible
 from core import sheets_backup
 
@@ -147,6 +147,7 @@ _SELECT_TURNOS = (
 )
 
 
+@reintento_de_lectura
 def _leer_turnos(archivado: bool) -> pd.DataFrame:
     with get_engine().connect() as conn:
         rows = conn.execute(text(_SELECT_TURNOS), {"arch": archivado}).mappings().all()
@@ -194,14 +195,19 @@ def leer_historico() -> pd.DataFrame:
         return _df_vacio()
 
 
+@reintento_de_lectura
+def _leer_horas_esperadas_bd():
+    with get_engine().connect() as conn:
+        return conn.execute(
+            text("SELECT anio, mes, horas FROM horas_esperadas ORDER BY anio, mes")
+        ).all()
+
+
 @st.cache_data(ttl=300)
 def leer_horas_esperadas() -> pd.DataFrame:
     """Tabla horas_esperadas -> DataFrame [Año (int), Mes (int), Horas (float)]."""
     try:
-        with get_engine().connect() as conn:
-            rows = conn.execute(
-                text("SELECT anio, mes, horas FROM horas_esperadas ORDER BY anio, mes")
-            ).all()
+        rows = _leer_horas_esperadas_bd()
         return pd.DataFrame(
             {"Año": [int(r[0]) for r in rows],
              "Mes": [int(r[1]) for r in rows],
