@@ -1,8 +1,7 @@
 """Paleta de marca Transoceánica y CSS compartido entre vistas.
 
-Única fuente de los colores corporativos: views/super_admin.py los importa
-para su CSS y tema Altair, y el marcador (colaborador + login) usa aquí su
-estilo de quiosco. El tema de widgets nativos vive en .streamlit/config.toml.
+Única fuente de los colores corporativos. El tema de los widgets nativos de
+Streamlit vive aparte, en .streamlit/config.toml.
 """
 
 import streamlit as st
@@ -33,10 +32,8 @@ BRAND_EVENTO = "#7A5CA6"  # morado para faltas/permisos en el gráfico
 
 
 def inject_kiosk_css() -> None:
-    """Estilo de quiosco para el marcador y las pantallas de login: tarjetas
-    de estado, reloj y botón de acción grande (pensado para celular/tablet y
-    PCs compartidas). El botón grande aplica solo a los 'primary'; los
-    secundarios (cerrar sesión, admin) quedan de tamaño normal."""
+    """Estilo de quiosco para el marcador y el login, pensado para celular,
+    tablet y PC compartida. El botón grande aplica solo a los 'primary'."""
     st.markdown(
         f"""
         <style>

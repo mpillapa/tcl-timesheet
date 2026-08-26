@@ -1,9 +1,8 @@
-"""Vista del colaborador: quiosco de marcación.
+"""Quiosco de marcación del colaborador.
 
-Muestra el estado real del turno del empleado y UNA sola acción contextual:
-si no tiene turno abierto solo puede marcar entrada; si lo tiene, solo salida.
-Esto elimina de raíz las marcaciones equivocadas (antes ambos botones estaban
-siempre visibles y el error se descubría después del clic).
+Expone una sola acción a la vez según el estado real del turno, para eliminar
+de raíz las marcaciones equivocadas: con ambos botones visibles, el error se
+descubría después del clic.
 """
 
 import time
@@ -116,8 +115,7 @@ def vista_colaborador() -> None:
     if "aviso_revision" in st.session_state:
         _dialogo_revision(st.session_state["aviso_revision"])
 
-    # Post-marcación: solo tarjeta de éxito + cuenta regresiva (sin botones,
-    # para no mostrar estado desactualizado ni permitir acciones dobles).
+    # Sin botones, para no mostrar estado desactualizado ni permitir dobles.
     if st.session_state.get("auto_logout_started_at"):
         st.markdown(
             """
@@ -137,7 +135,6 @@ def vista_colaborador() -> None:
         _procesar_auto_logout()
         return
 
-    # Estado real del turno -> una sola acción contextual.
     df = leer_registros()
     idx_abierto = buscar_turno_abierto_idx(df, usuario)
 
@@ -181,8 +178,8 @@ def vista_colaborador() -> None:
         if st.button("Marcar Salida", use_container_width=True, type="primary"):
             marcar_salida(usuario)
 
-    # Si la salida excedió el umbral, el formulario debe aparecer en este mismo
-    # render (marcar_salida acaba de setear salida_pendiente).
+    # Si la salida excedió el umbral, marcar_salida acaba de setear
+    # salida_pendiente y el formulario debe salir en este mismo render.
     render_formulario_justificacion()
 
     _procesar_auto_logout()

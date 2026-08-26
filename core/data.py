@@ -1,23 +1,15 @@
 """Capa de datos sobre PostgreSQL (Supabase).
 
 La base de datos es la fuente de verdad; Google Sheets queda como espejo de
-respaldo best-effort (ver core.sheets_backup). Este módulo conserva la MISMA
-API pública que la versión sobre Sheets, así que las vistas no cambian:
+respaldo best-effort (ver core.sheets_backup).
 
-    leer_registros, leer_historico, leer_horas_esperadas,
-    append_registro, append_registros_batch,
-    actualizar_por_entrada, actualizar_varios_por_entrada,
-    eliminar_por_entrada, archivar_historico,
-    calcular_horas, calcular_horas_efectivas, calcular_horas_extra,
-    buscar_turno_abierto_idx
+Los DataFrames devueltos mantienen las 11 columnas en español (COLUMNAS), dtype
+object, timestamps como strings TS_FMT y celdas vacías como "", igual que
+devolvía la lectura del Sheet, para no romper filtros ni estilos.
 
-Los DataFrames devueltos mantienen las 11 columnas en español (COLUMNAS),
-dtype object, timestamps como strings TS_FMT y celdas vacías como "" — igual
-que devolvía la lectura del Sheet, para no romper filtros ni estilos.
-
-El "archivado" dejó de ser una necesidad de rendimiento (Postgres maneja sin
-problema todo el histórico); se conserva como flag booleano para que el panel
-siga separando mes activo vs histórico sin cambios.
+El "archivado" ya no hace falta por rendimiento (Postgres aguanta todo el
+histórico); se conserva como flag para que el panel siga separando mes activo
+de histórico.
 """
 
 from datetime import date, datetime
@@ -36,7 +28,6 @@ from core.calculos import calcular_horas, calcular_horas_efectivas, calcular_hor
 from core.normalizacion import _normalizar_texto, _normalizar_cmp, _normalizar_serie  # noqa: F401
 
 
-# Columna de la app (español) -> columna SQL de la tabla turnos.
 _COL_SQL = {
     "Nombre": "nombre",
     "Area": "area",
@@ -81,10 +72,8 @@ def _a_fecha(val):
 
 
 def _a_num(val):
-    """'' -> None; numérico/str -> float.
-
-    Acepta coma decimal ('9,62'): el Sheet en locale es-EC entregaba así casi
-    todas las horas legacy, y sin esto se migrarían/guardarían como nulas."""
+    """'' -> None; numérico/str -> float. Acepta coma decimal ('9,62'), que es
+    como el Sheet en locale es-EC entregaba casi todas las horas legacy."""
     if val is None or val == "":
         return None
     try:
@@ -98,7 +87,6 @@ def _a_num(val):
 
 
 def _valor_sql(col_app: str, val):
-    """Convierte un valor de la app al tipo que espera la columna SQL."""
     if col_app in _COLS_TS:
         return _a_ts(val)
     if col_app in _COLS_FECHA:
@@ -111,17 +99,15 @@ def _valor_sql(col_app: str, val):
 def _fila_a_params(fila: dict) -> dict:
     """Dict de la app (claves en español) -> params SQL para INSERT."""
     params = {sql_col: _valor_sql(app_col, fila.get(app_col, "")) for app_col, sql_col in _COL_SQL.items()}
-    # Red de seguridad: fecha_turno es NOT NULL en la tabla. Estado vacío se
-    # preserva tal cual ('' cumple NOT NULL): hay filas legacy con Estado vacío
-    # y "Abierto" en Observaciones que buscar_turno_abierto_idx maneja aparte.
+    # fecha_turno es NOT NULL. El Estado vacío sí se preserva: hay filas legacy
+    # con "Abierto" en Observaciones que buscar_turno_abierto_idx maneja aparte.
     if params["fecha_turno"] is None and params["ts_entrada"] is not None:
         params["fecha_turno"] = params["ts_entrada"].date()
     return params
 
 
 def _df_desde_filas(rows) -> pd.DataFrame:
-    """Filas SQL -> DataFrame con el formato legacy exacto de la app:
-    columnas COLUMNAS, dtype object, '' para nulos, timestamps TS_FMT."""
+    """Filas SQL -> DataFrame en el formato legacy que espera la app."""
     datos = {c: [] for c in COLUMNAS}
     for r in rows:
         for app_col, sql_col in _COL_SQL.items():
@@ -162,11 +148,8 @@ def _df_vacio() -> pd.DataFrame:
 # Espejo de respaldo (best-effort: nunca bloquea la operación principal)
 # ---------------------------------------------------------------------------
 def _espejo(func, *args) -> None:
-    """Encola la réplica de respaldo en Google Sheets para ejecutarla en SEGUNDO
-    PLANO. Antes esto era síncrono y hacía esperar a cada marcación ~0.8-2.7 s
-    por Google; ahora la operación crítica (base de datos) ya terminó y el espejo
-    no bloquea. Los fallos del respaldo se registran en core.sheets_backup
-    (ver errores_espejo) en vez de interrumpir al usuario."""
+    """Encola la réplica en Sheets para ejecutarla en segundo plano. En síncrono
+    hacía esperar a cada marcación entre 0.8 y 2.7 s por Google."""
     if not sheets_backup.espejo_habilitado():
         return
     sheets_backup.encolar(func, *args)
@@ -264,8 +247,8 @@ def append_registros_batch(filas: list) -> int:
 
 
 def _armar_update(cambios: dict):
-    """(SET sql, params) a partir de un dict de cambios con claves en español.
-    Devuelve (None, None) si ningún cambio aplica a columnas conocidas."""
+    """(SET sql, params), o (None, None) si ningún cambio toca una columna
+    conocida."""
     sets = []
     params = {}
     for i, (col_app, val) in enumerate(cambios.items()):
@@ -282,17 +265,13 @@ def _armar_update(cambios: dict):
 
 
 def _con_fecha_turno_derivada(cambios: dict) -> dict:
-    """Regla de negocio: la Fecha de Turno es SIEMPRE la fecha de la ENTRADA.
+    """Regla de negocio: la Fecha de Turno es siempre la fecha de la entrada,
+    también cuando el turno cruza la medianoche.
 
-    Cuando una edición mueve el Timestamp Entrada sin fijar explícitamente la
-    Fecha de Turno, se recalcula aquí a partir de la nueva entrada, para que la
-    fecha con la que los gráficos agrupan (fecha_turno) no quede desfasada
-    respecto a la entrada corregida. Un turno que cruza la medianoche conserva la
-    fecha de la entrada, no la de la salida.
-
-    Devuelve un dict nuevo (no muta el original). Guarda la fecha como texto
-    '%Y-%m-%d' para que el espejo en Sheets reciba el mismo formato que ya usa esa
-    columna; en SQL, _a_fecha vuelve a interpretar ese texto como date."""
+    Si una edición mueve el Timestamp Entrada sin fijar la Fecha de Turno, se
+    recalcula aquí, para que la fecha por la que agrupan los gráficos no quede
+    desfasada. Devuelve un dict nuevo, con la fecha como texto '%Y-%m-%d' para
+    que el espejo en Sheets reciba el formato que ya usa esa columna."""
     if "Timestamp Entrada" not in cambios or "Fecha de Turno" in cambios:
         return cambios
     ts_ent = _a_ts(cambios["Timestamp Entrada"])
@@ -304,11 +283,10 @@ def _con_fecha_turno_derivada(cambios: dict) -> dict:
 
 
 def actualizar_por_entrada(nombre: str, ts_entrada_str: str, cambios: dict) -> bool:
-    """Actualiza SOLO las columnas indicadas en `cambios` de la fila que matchea
-    (Nombre, Timestamp Entrada). Devuelve False si la fila no existe.
-    `cambios` puede incluir un nuevo Timestamp Entrada (edición de turnos):
-    la fila se localiza por el timestamp ORIGINAL. Si cambia la entrada, la Fecha
-    de Turno se recalcula automáticamente (ver _con_fecha_turno_derivada)."""
+    """Actualiza solo las columnas de `cambios` en la fila (Nombre, Timestamp
+    Entrada). False si la fila no existe. `cambios` puede traer un Timestamp
+    Entrada nuevo: la fila se localiza por el original y la Fecha de Turno se
+    recalcula sola (ver _con_fecha_turno_derivada)."""
     ts = _a_ts(ts_entrada_str)
     if ts is None:
         return False
@@ -333,12 +311,11 @@ def actualizar_por_entrada(nombre: str, ts_entrada_str: str, cambios: dict) -> b
 
 
 def actualizar_varios_por_entrada(cambios_por_entrada: list) -> int:
-    """Aplica varios cambios en UNA transacción. Cada elemento es
+    """Aplica varios cambios en una sola transacción. Cada elemento es
     (nombre, ts_entrada_str, cambios). Devuelve cuántas filas se actualizaron."""
     if not cambios_por_entrada:
         return 0
-    # Aplica la misma regla de Fecha de Turno que la edición individual, y con la
-    # lista ya derivada tanto el UPDATE como el espejo escriben la fecha correcta.
+    # Derivar la lista antes hace que el UPDATE y el espejo escriban lo mismo.
     cambios_por_entrada = [
         (nombre, ts_str, _con_fecha_turno_derivada(cambios))
         for nombre, ts_str, cambios in cambios_por_entrada
@@ -390,8 +367,8 @@ def archivar_historico(solo_un_mes: bool) -> dict:
     al primer día del mes actual. 'Abierto'/'Revision' nunca se archivan.
 
     Si `solo_un_mes` es True (uso automático) y lo pendiente abarca más de un
-    mes calendario, NO archiva y devuelve bloqueado=True (backlog inicial se
-    resuelve manualmente). Devuelve {'archivadas', 'bloqueado', 'meses'}."""
+    mes calendario, no archiva y devuelve bloqueado=True (el backlog inicial se
+    resuelve a mano). Devuelve {'archivadas', 'bloqueado', 'meses'}."""
     inicio_mes = now_ecuador().date().replace(day=1)
     try:
         with get_engine().connect() as conn:
@@ -423,15 +400,11 @@ def archivar_historico(solo_un_mes: bool) -> dict:
         return {"archivadas": 0, "bloqueado": False, "meses": []}
 
 
-# ---------------------------------------------------------------------------
-# Utilidades sobre DataFrames (sin cambios respecto a la versión Sheets)
-# ---------------------------------------------------------------------------
 def buscar_turno_abierto_idx(df: pd.DataFrame, nombre: str):
-    """Devuelve el índice del turno abierto del empleado, o None.
+    """Índice del turno abierto del empleado, o None.
 
-    Incluye un fallback para filas legacy que quedaron con "Abierto" en la
-    columna Observaciones y Estado vacío, producto de un bug histórico de
-    desalineo de columnas (ya corregido)."""
+    El fallback cubre las filas legacy con "Abierto" en Observaciones y Estado
+    vacío, que dejó un desalineo de columnas ya corregido."""
     if df.empty:
         return None
 

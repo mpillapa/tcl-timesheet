@@ -8,11 +8,6 @@ Estructura esperada en secrets:
     "7404" = {nombre = "Yanza Cristina", area = "BODEGA"}
     ...
 
-Exporta:
-    PIN_A_EMPLEADO   — dict {pin: nombre}
-    EMPLEADOS_POR_AREA — dict {area: [nombres]}
-    AREA_DE          — dict {nombre: area}
-    AREAS            — lista de áreas
 """
 
 import streamlit as st

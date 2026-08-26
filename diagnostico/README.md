@@ -53,7 +53,6 @@ En [`../core/db.py`](../core/db.py):
 | `statement_timeout` | 2 min (default de Supabase) | 30 s | limitar la consulta del lado del servidor |
 | `pool_timeout` | 30 s (implícito) | 15 s | limitar la espera por una conexión libre |
 | `pool_recycle` | 1800 s | 240 s | renovar antes de que el pooler la descarte |
-
 | `tcp_user_timeout` | ninguno | 15 s | cortar si la conexión muere a mitad de una consulta |
 | reintento de lecturas | ninguno | 3 intentos | recuperarse solo, sin mostrar error |
 
@@ -65,7 +64,7 @@ descarta el pool completo, abre conexiones nuevas y vuelve a intentar. Es lo
 mismo que se lograba reiniciando la aplicación a mano, pero automático y en
 un segundo.
 
-Se aplica solo a lecturas, a propósito. Reintentar una escritura podría
+Se aplica solo a lecturas, de forma deliberada. Reintentar una escritura podría
 insertar el mismo turno dos veces, y eso es peor que mostrar un error. Las
 escrituras sí se benefician de los keepalives y de los tiempos límite, que es
 lo que impide que se queden colgadas.

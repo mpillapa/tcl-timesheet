@@ -2,21 +2,21 @@
 
 La base de datos pasa a ser la **fuente de verdad**; Google Sheets queda como
 **espejo de respaldo** (cada escritura se replica automáticamente al Sheet).
-Esta guía te lleva de cero a producción. Tiempo estimado: 20–30 minutos.
+Esta guía te lleva de cero a producción. Tiempo estimado: entre 20 y 30 minutos.
 
 ---
 
-## Paso 1 — Crear el proyecto en Supabase
+## Paso 1. Crear el proyecto en Supabase
 
 1. Entra a [supabase.com](https://supabase.com) con tu cuenta → **New project**.
 2. Nombre: `turnero-tcl` (o el que prefieras).
 3. **Database password**: usa el generador de Supabase, pero asegúrate de que
-   solo tenga **letras y números** (sin `@`, `:`, `/`, `#`, `?` — esos
-   caracteres rompen la URL de conexión). Guárdala: la necesitas en el paso 2.
+   solo tenga **letras y números** (sin `@`, `:`, `/`, `#`, `?`, porque
+   esos caracteres rompen la URL de conexión). Guárdala: la necesitas en el paso 2.
 4. Región: `East US (North Virginia)` es la más cercana a Ecuador.
 5. Espera ~2 minutos a que el proyecto termine de crearse.
 
-## Paso 2 — Copiar la URL de conexión
+## Paso 2. Copiar la URL de conexión
 
 1. En el panel del proyecto, botón **Connect** (arriba).
 2. Busca la sección **Session pooler** y copia la URI. Se ve así:
@@ -30,7 +30,7 @@ Esta guía te lleva de cero a producción. Tiempo estimado: 20–30 minutos.
 
 3. Reemplaza `[YOUR-PASSWORD]` por la clave del paso 1 (sin los corchetes).
 
-## Paso 3 — Agregar la URL a secrets.toml
+## Paso 3. Agregar la URL a secrets.toml
 
 Abre `.streamlit/secrets.toml` y agrega estos bloques (puede ser al final):
 
@@ -43,9 +43,9 @@ espejo_sheets = true
 ```
 
 `espejo_sheets = true` mantiene el respaldo automático en Google Sheets.
-El bloque `[connections.gsheets]` existente NO se toca (el espejo lo usa).
+El bloque `[connections.gsheets]` existente no se toca, porque el espejo lo usa.
 
-## Paso 4 — Ejecutar la migración
+## Paso 4. Ejecutar la migración
 
 Desde la carpeta del proyecto (rama `feature/supabase`):
 
@@ -58,10 +58,10 @@ El script:
 - copia Registros, Historico y Horas Esperadas del Sheet a la base,
 - verifica que los totales cuadren y reporta cualquier fila con problemas.
 
-**No modifica el Sheet** (solo lee) y es **re-ejecutable**: si algo falla a
-mitad, córrelo de nuevo; las filas ya migradas se omiten solas.
+No modifica el Sheet, solo lee, y se puede volver a ejecutar: si algo falla a
+mitad, córrelo de nuevo y las filas ya migradas se omiten solas.
 
-## Paso 5 — Probar en local
+## Paso 5. Probar en local
 
 ```powershell
 .venv\Scripts\streamlit run app.py
@@ -74,7 +74,7 @@ Checklist de prueba:
 - [ ] Panel super admin: dashboard, filtros y tabla cargan (nota la velocidad).
 - [ ] Una corrección manual desde el panel.
 
-## Paso 6 — Desplegar a producción
+## Paso 6. Desplegar a producción
 
 1. Sube la rama y fusiónala:
    ```powershell
@@ -97,11 +97,11 @@ Checklist de prueba:
   reemplazo del Sheet como "vista de administrador de datos".
 - **Horas esperadas del mes**: ya no se editan en la hoja "Horas Esperadas";
   se editan en la tabla `horas_esperadas` del Table Editor (columnas
-  `anio`, `mes` (1–12), `horas`).
+  `anio`, `mes` (de 1 a 12), `horas`).
 - **El Sheet es solo respaldo**: no edites filas a mano ahí; los cambios
-  manuales en el Sheet NO llegan a la base de datos.
+  manuales en el Sheet no llegan a la base de datos.
 - **Apagar el espejo** (cuando tengas plena confianza): cambia
-  `espejo_sheets = false` en secrets. Las marcaciones se vuelven ~1–2 s
+  `espejo_sheets = false` en secrets. Las marcaciones se vuelven entre 1 y 2 s
   más rápidas.
 
 ## Si algo sale mal (rollback)

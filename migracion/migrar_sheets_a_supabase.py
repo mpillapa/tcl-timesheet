@@ -1,9 +1,9 @@
 """Migracion inicial: Google Sheets -> PostgreSQL (Supabase).
 
 Copia Registros (archivado=false), Historico (archivado=true) y Horas
-Esperadas a la base de datos. NO modifica el Sheet: solo lee.
+Esperadas a la base de datos. No modifica el Sheet: solo lee.
 
-Es IDEMPOTENTE: se puede ejecutar varias veces; las filas que ya existen en
+Es idempotente: se puede ejecutar varias veces; las filas que ya existen en
 la base (misma clave Nombre + Timestamp Entrada) se omiten sin error.
 
 Uso, desde la carpeta del proyecto:
@@ -68,7 +68,6 @@ def main() -> int:
         conn.exec_driver_sql(schema_sql)
     print("      OK")
 
-    # 2) Leer el Sheet.
     print("[2/5] Leyendo Google Sheets (Registros, Historico, Horas Esperadas)...")
     df_reg = sheets_backup.leer_registros_sheets()
     df_hist = sheets_backup.leer_historico_sheets()
@@ -76,7 +75,6 @@ def main() -> int:
     print(f"      Registros: {len(df_reg)} filas | Historico: {len(df_hist)} filas | "
           f"Horas Esperadas: {len(df_horas)} filas")
 
-    # 3) Preparar e insertar turnos.
     print("[3/5] Insertando turnos en la base de datos...")
     lote_reg, prob_reg, dup_reg = _preparar_lote(df_reg, archivado=False)
     lote_hist, prob_hist, dup_hist = _preparar_lote(df_hist, archivado=True)
@@ -109,7 +107,6 @@ def main() -> int:
     else:
         print("      (hoja vacia o inexistente, nada que migrar)")
 
-    # 5) Verificacion.
     print("[5/5] Verificando totales...")
     with engine.connect() as conn:
         n_act = conn.execute(text("SELECT count(*) FROM turnos WHERE archivado = false")).scalar()

@@ -1,14 +1,8 @@
-"""Prueba la conexion a Supabase por los dos puertos del pooler.
+"""Prueba la conexion a Supabase por los dos puertos del pooler, con un limite
+de 10 segundos, para que un fallo se convierta en un mensaje legible en vez de
+una espera indefinida como la de la aplicacion.
 
-Para que existe: cuando la aplicacion se queda colgada en "Running
-leer_registros()", no hay ningun error que leer, porque el engine no tiene
-tiempo limite de conexion y libpq espera indefinidamente. Este script hace lo
-mismo que la aplicacion pero con un limite de 10 segundos, de modo que el fallo
-se convierte en un mensaje legible.
-
-Prueba los dos puertos para poder compararlos:
-
-  5432  pooler de sesion     (el que usa hoy la aplicacion)
+  5432  pooler de sesion      (el que usa hoy la aplicacion)
   6543  pooler de transaccion (al que migro HERRAMIENTAS_DOCUMENTALES_WEB
                                el 2026-08-24 por un fallo del de sesion)
 

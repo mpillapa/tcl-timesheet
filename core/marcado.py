@@ -54,8 +54,7 @@ def programar_cierre_sesion() -> None:
 
 
 def guardar_salida(nombre: str, ts_entrada_str: str, ts_salida, horas, observacion) -> bool:
-    """Cierra un turno localizándolo por (Nombre, Timestamp Entrada) sobre una
-    lectura fresca. Devuelve False si la fila ya no existe."""
+    """Cierra el turno (Nombre, Timestamp Entrada). False si ya no existe."""
     cambios = {
         "Timestamp Salida": ts_salida.strftime(TS_FMT),
         "Horas Trabajadas": horas,
@@ -68,18 +67,16 @@ def guardar_salida(nombre: str, ts_entrada_str: str, ts_salida, horas, observaci
 
 
 def marcar_entrada(nombre: str) -> None:
-    # Debounce: si ya se procesó una entrada en los últimos _DEBOUNCE_ENTRADA_SECS
-    # segundos para este mismo empleado, ignorar el clic extra (doble-click).
     debounce_key = f"_debounce_entrada_{nombre}"
     ahora = now_ecuador()
     ultima = st.session_state.get(debounce_key)
     if ultima and (ahora - ultima).total_seconds() < _DEBOUNCE_ENTRADA_SECS:
-        # Segundo clic detectado. Si el primer rerun fue interrumpido antes de
-        # llamar a programar_cierre_sesion(), arrancar el countdown desde aquí.
+        # Si el primer rerun se interrumpió antes de programar_cierre_sesion(),
+        # arrancar el countdown desde aquí.
         if not st.session_state.get("auto_logout_started_at"):
             programar_cierre_sesion()
         return
-    # Fijar el lock antes de cualquier I/O para que el segundo rerun vea el flag
+    # Antes de cualquier I/O, para que el segundo rerun vea el flag.
     st.session_state[debounce_key] = ahora
 
     df = leer_registros()
@@ -180,9 +177,8 @@ def marcar_salida(nombre: str) -> None:
 
     horas = calcular_horas(ts_entrada, ahora)
 
-    # Olvido de salida: si el turno superó UMBRAL_OLVIDO_H no se cierra como
-    # completo (la duración no es confiable, ej. 20 h). Se envía a revisión de
-    # supervisor sin registrar la salida, igual que detecta marcar_entrada.
+    # Pasado UMBRAL_OLVIDO_H la duración no es confiable (20 h, por ejemplo), así
+    # que va a revisión sin registrar la salida.
     horas_abiertas = (ahora - ts_entrada).total_seconds() / 3600
     if horas_abiertas > UMBRAL_OLVIDO_H:
         obs_prev = str(df.loc[idx, "Observaciones"] or "").strip()
@@ -199,9 +195,8 @@ def marcar_salida(nombre: str) -> None:
         ):
             st.error("El turno ya no existe o no se pudo enviar a revisión. Refresca la página.")
             return
-        # Aviso por pop-up en la vista del colaborador. A diferencia de una salida
-        # normal NO se cierra sesión: el empleado puede marcar su entrada para
-        # iniciar la jornada de hoy.
+        # No se cierra sesión, a diferencia de una salida normal: el empleado
+        # puede marcar su entrada para iniciar la jornada de hoy.
         st.session_state["aviso_revision"] = {
             "nombre": nombre,
             "horas": horas_abiertas,
@@ -232,14 +227,11 @@ def marcar_salida(nombre: str) -> None:
 
 
 def barrer_turnos_olvidados(df) -> int:
-    """Envía a revisión los turnos 'Abierto' con más de UMBRAL_OLVIDO_H horas
-    desde su entrada (olvido de salida).
+    """Envía a revisión los turnos 'Abierto' con más de UMBRAL_OLVIDO_H horas.
 
-    A diferencia de marcar_entrada/marcar_salida —que solo actúan cuando el
-    propio empleado vuelve a marcar—, este barrido detecta turnos olvidados sin
-    depender de él. Pensado para ejecutarse al abrir el panel de super admin.
-    Devuelve cuántos turnos marcó. Recibe un df ya leído (leer_registros) para
-    no duplicar la lectura de la hoja."""
+    marcar_entrada y marcar_salida solo actúan cuando el empleado vuelve a
+    marcar; este barrido no depende de él. Corre al abrir el panel de super
+    admin. Recibe el df ya leído para no duplicar la lectura."""
     if df is None or df.empty:
         return 0
     ahora = now_ecuador()
@@ -265,7 +257,6 @@ def barrer_turnos_olvidados(df) -> int:
             str(fila["Timestamp Entrada"]),
             {"Estado": ESTADO_REVISION, "Observaciones": obs_nueva},
         ))
-    # Una sola lectura + una sola escritura batch, sin importar cuántos sean.
     return actualizar_varios_por_entrada(cambios)
 
 

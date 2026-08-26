@@ -16,9 +16,6 @@ from core.employees import PIN_A_EMPLEADO, AREA_DE
 from core.ui_theme import inject_kiosk_css, inject_login_css
 
 
-# ---------------------------------------------------------------------------
-# Helpers
-# ---------------------------------------------------------------------------
 def _obtener_ip_publica_browser():
     try:
         res = st_javascript(
@@ -36,22 +33,16 @@ def _obtener_ip_publica_browser():
     return res.strip()
 
 
-# ---------------------------------------------------------------------------
-# Equipo de confianza (token persistente en el navegador / localStorage)
-#
-# Una laptop "de confianza" guarda un token en localStorage y deja de pedir la
-# clave maestra al ingresar desde fuera de la oficina. NO salta el login: el
-# super admin igual ingresa usuario + contraseña. Para revocar TODOS los equipos
-# basta con cambiar 'trusted_device_secret' en secrets (los tokens viejos dejan
-# de coincidir). No se puede leer hardware (MAC/serial) desde un navegador, por
-# eso se usa este token por-navegador.
-# ---------------------------------------------------------------------------
+# --- Equipo de confianza (token en localStorage) ---------------------------
+# Una laptop de confianza guarda un token y deja de pedir la clave maestra al
+# ingresar desde fuera de la oficina. No salta el login. Para revocar todos los
+# equipos, cambiar 'trusted_device_secret' en secrets. Es por navegador porque
+# desde el navegador no se puede leer el hardware (MAC o serial).
 def _leer_token_dispositivo():
-    """Lee el token de equipo de confianza desde localStorage.
+    """None mientras el navegador responde, "" si no hay token, o el token.
 
-    Devuelve None mientras el navegador responde (aún cargando), "" si no hay
-    token guardado, o el token (str) si existe. Usa un centinela '__NONE__'
-    para distinguir 'sin token' de 'todavía cargando' (ambos darían None/0)."""
+    El centinela '__NONE__' distingue 'sin token' de 'todavía cargando', que de
+    otro modo llegarían los dos como None."""
     try:
         res = st_javascript(
             "await (async () => { const v = window.localStorage.getItem('tcl_device_token');"
@@ -85,11 +76,8 @@ def _borrar_token_dispositivo() -> None:
 
 
 def confiar_equipo_ui() -> None:
-    """Controles para marcar/desmarcar este navegador como equipo de confianza.
-
-    Pensado para laptops de super admins: una vez marcado, el equipo deja de
-    pedir la clave maestra al ingresar desde fuera de la oficina (igual se exige
-    usuario + contraseña). Afecta solo a este navegador en este equipo."""
+    """Controles para marcar o desmarcar este navegador como equipo de
+    confianza. Pensado para las laptops de los super admins."""
     try:
         secret_conf = str(st.secrets["auth"].get("trusted_device_secret", ""))
     except (KeyError, FileNotFoundError):
@@ -131,9 +119,8 @@ def logout() -> None:
     ):
         st.session_state.pop(k, None)
 
-    # Los filtros del panel y su espejo persistente se limpian por prefijo: si
-    # quedaran, el siguiente admin que entre en este mismo navegador heredaría la
-    # selección del anterior (incluidos nombres de áreas que no le competen).
+    # Por prefijo: si quedaran, el siguiente admin que entre en este navegador
+    # heredaría la selección del anterior, áreas que no le competen incluidas.
     for k in [
         k for k in list(st.session_state.keys())
         if str(k).startswith(("filtro_", "_persist_filtro", "_universo_filtro"))
@@ -141,9 +128,7 @@ def logout() -> None:
         st.session_state.pop(k, None)
 
 
-# ---------------------------------------------------------------------------
-# Capa 1: gate de red
-# ---------------------------------------------------------------------------
+# --- Capa 1: gate de red ---------------------------------------------------
 def _capa1_gate() -> None:
     try:
         auth_cfg = dict(st.secrets["auth"])
@@ -175,9 +160,8 @@ def _capa1_gate() -> None:
         st.session_state["gate_via"] = f"IP oficina ({ip_browser})"
         return
 
-    # Equipo de confianza: solo se evalúa cuando la IP no coincide (los equipos
-    # de oficina ya pasaron arriba), para no penalizar el flujo común. Permite a
-    # laptops de super admins entrar sin clave maestra desde casa.
+    # Solo se evalúa cuando la IP no coincide, porque los equipos de oficina ya
+    # pasaron arriba y no hay que penalizar el flujo común.
     secret_conf = str(auth_cfg.get("trusted_device_secret", ""))
     if secret_conf:
         token_disp = _leer_token_dispositivo()
@@ -221,9 +205,7 @@ def _capa1_gate() -> None:
     st.stop()
 
 
-# ---------------------------------------------------------------------------
-# Control Login
-# ---------------------------------------------------------------------------
+# --- Capa 3: login por rol -------------------------------------------------
 def _capa3_login_colaborador() -> None:
     inject_login_css()
     c1, c2 = st.columns([4, 1])
@@ -284,9 +266,6 @@ def _capa3_login_super_admin() -> None:
     st.stop()
 
 
-# ---------------------------------------------------------------------------
-# Entrypoint
-# ---------------------------------------------------------------------------
 def check_access() -> None:
     if st.session_state.get("auth_ok"):
         return

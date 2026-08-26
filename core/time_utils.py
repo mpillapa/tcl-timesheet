@@ -23,21 +23,17 @@ def _ecuador_tz():
 
 
 def now_ecuador() -> datetime:
-    """Devuelve la fecha/hora actual de Ecuador como datetime naive local (UTC-5)."""
+    """Fecha y hora de Ecuador como datetime naive (sin tzinfo)."""
     return datetime.now(timezone.utc).astimezone(_ecuador_tz()).replace(tzinfo=None)
 
 
 def today_ecuador() -> date:
-    """Devuelve la fecha actual de Ecuador."""
     return now_ecuador().date()
 
 
 def parse_timestamp_flexible(raw):
-    """Parsea un timestamp desde los formatos que puede devolver Sheets.
-
-    Intenta primero el formato canónico (ISO) y cae a dayfirst (dd/mm) para
-    filas legacy. Devuelve un datetime naive o None si no se puede interpretar.
-    """
+    """Intenta el formato canónico (ISO) y cae a dayfirst (dd/mm) para las filas
+    legacy del Sheet. Devuelve None si no se puede interpretar."""
     ts = pd.to_datetime(raw, errors="coerce")
     if pd.isna(ts):
         ts = pd.to_datetime(raw, errors="coerce", dayfirst=True)
@@ -47,6 +43,6 @@ def parse_timestamp_flexible(raw):
 
 
 def parse_fecha_flexible(raw):
-    """Igual que parse_timestamp_flexible pero devuelve solo la fecha (o None)."""
+    """Igual que parse_timestamp_flexible, pero solo la fecha."""
     dt = parse_timestamp_flexible(raw)
     return dt.date() if dt is not None else None

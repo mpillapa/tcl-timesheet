@@ -1,23 +1,18 @@
 """Espejo de respaldo en Google Sheets.
 
-Desde la migración a PostgreSQL (Supabase), la base de datos es la fuente de
-verdad y este módulo mantiene el Sheet como COPIA DE RESPALDO best-effort:
+La base de datos es la fuente de verdad y el Sheet es copia de respaldo
+best-effort:
 
-  - Las funciones espejo_* replican cada escritura de la app en el Sheet.
-    Lanzan excepciones hacia arriba; core.data las envuelve en try/except para
-    que un fallo del respaldo NUNCA bloquee una marcación (el dato ya quedó
-    guardado en la base de datos).
-  - Las funciones leer_*_sheets leen el Sheet crudo; las usa el script de
-    migración inicial y sirven para auditar el respaldo.
+  - Las funciones espejo_* replican cada escritura y lanzan las excepciones
+    hacia arriba; core.data las captura para que un fallo del respaldo nunca
+    bloquee una marcación.
+  - Las funciones leer_*_sheets leen el Sheet crudo. Las usa la migración
+    inicial y sirven para auditar el respaldo.
 
-Se puede apagar el espejo sin tocar código con:
+El espejo se apaga con `espejo_sheets = false` en el bloque [backup] de secrets.
 
-    [backup]
-    espejo_sheets = false
-
-A diferencia de la versión histórica, espejo_append NO busca la posición
-cronológica de la fila (eso costaba una lectura completa de la hoja): en el
-respaldo el orden es cosmético y una sola llamada append_row basta.
+espejo_append no busca la posición cronológica de la fila, que costaba una
+lectura completa de la hoja: en el respaldo el orden es cosmético.
 """
 
 import logging
@@ -58,19 +53,10 @@ _worker_lock = threading.Lock()
 _espejo_errores = []  # últimos fallos del espejo, para diagnóstico del admin
 
 
-# ---------------------------------------------------------------------------
-# Espejo en segundo plano (asíncrono, best-effort)
-#
-# La marcación NO debe esperar a Google: la escritura crítica ya ocurrió en la
-# base de datos (fuente de verdad) y el Sheet es solo respaldo. Antes, cada
-# marcación bloqueaba ~0.8-2.7 s abriendo gspread y llamando a la API de Sheets.
-# Ahora esas operaciones se encolan y las procesa un ÚNICO hilo daemon:
-#   - un solo consumidor => gspread lo usa siempre el mismo hilo (sin carreras);
-#   - la cola preserva el ORDEN, así operaciones sobre una misma fila (p.ej.
-#     actualizar y luego eliminar) se aplican en el respaldo en el orden correcto.
-# Los fallos se registran (logger + errores_espejo) en lugar de mostrarse al
-# usuario; el respaldo siempre puede re-sincronizarse desde la base.
-# ---------------------------------------------------------------------------
+# --- Espejo en segundo plano -----------------------------------------------
+# Un único hilo daemon consume la cola, por dos razones: gspread lo usa siempre
+# el mismo hilo, sin carreras, y el orden se preserva, de modo que actualizar y
+# luego eliminar la misma fila se aplica en ese orden en el respaldo.
 def _worker_espejo() -> None:
     while True:
         func, args = _cola_espejo.get()
@@ -112,7 +98,7 @@ def espejo_habilitado() -> bool:
 
 
 def _get_worksheet():
-    """Devuelve (y cachea) el objeto gspread.Worksheet de la hoja Registros."""
+    """Worksheet de la hoja Registros, cacheado."""
     global _worksheet
     if _worksheet is not None:
         return _worksheet
@@ -130,10 +116,8 @@ def _get_worksheet():
 
 
 def _get_header() -> list:
-    """Header de la hoja, cacheado tras la primera lectura (o tras asegurar el
-    esquema) para no leer la fila 1 en CADA escritura espejo (~380 ms por
-    llamada). Si se editan las columnas de la hoja manualmente con la app
-    corriendo, basta reiniciar el proceso para refrescarlo."""
+    """Header cacheado, para no leer la fila 1 en cada escritura espejo (~380 ms
+    por llamada). Si se editan las columnas a mano, reiniciar el proceso."""
     global _header_cache
     if _header_cache is None:
         _header_cache = _get_worksheet().row_values(1)
@@ -141,12 +125,9 @@ def _get_header() -> list:
 
 
 def _asegurar_columnas_esquema() -> None:
-    """Garantiza que el encabezado de la hoja tenga todas las columnas de
-    COLUMNAS. Las que falten se agregan al final, una sola vez por sesión.
-
-    Las escrituras solo persisten columnas presentes en el encabezado real:
-    una columna nueva del esquema no se guardaría hasta existir físicamente
-    en la hoja."""
+    """Agrega al final las columnas de COLUMNAS que falten en el encabezado, una
+    vez por sesión. Las escrituras solo persisten columnas que existan
+    físicamente en la hoja."""
     global _esquema_asegurado, _header_cache
     if _esquema_asegurado:
         return
@@ -170,9 +151,8 @@ def _asegurar_columnas_esquema() -> None:
 # Lecturas crudas (migración / auditoría)
 # ---------------------------------------------------------------------------
 def _valores_a_df(values) -> pd.DataFrame:
-    """Convierte la matriz cruda de una hoja (get_all_values) al DataFrame
-    normalizado de la app (mismas 11 columnas, textos limpios, columnas
-    derivadas backfilleadas en filas legacy)."""
+    """Matriz cruda de get_all_values al DataFrame normalizado de la app, con las
+    columnas derivadas rellenadas en las filas legacy."""
     if not values:
         return pd.DataFrame({c: pd.Series(dtype=object) for c in COLUMNAS})
 
@@ -328,7 +308,7 @@ def espejo_actualizar(nombre: str, ts_entrada_str: str, cambios: dict) -> bool:
 
 
 def espejo_actualizar_varios(cambios_por_entrada: list) -> int:
-    """Aplica varios cambios en UNA lectura + UNA escritura batch.
+    """Aplica varios cambios con una sola lectura y una sola escritura batch.
     Cada elemento es (nombre, ts_entrada_str, cambios)."""
     if not cambios_por_entrada:
         return 0
@@ -373,7 +353,6 @@ def espejo_actualizar_varios(cambios_por_entrada: list) -> int:
 
 
 def espejo_eliminar(nombre: str, ts_entrada_str: str) -> bool:
-    """Elimina del Sheet la fila que matchea (Nombre, Timestamp Entrada)."""
     ws = _get_worksheet()
     all_values = ws.get_all_values()
     if len(all_values) < 2:
@@ -403,7 +382,7 @@ def _agrupar_contiguos(indices: list) -> list:
 
 
 def _get_worksheet_historico():
-    """Hoja Historico, creándola (con el mismo encabezado que Registros) si falta."""
+    """Hoja Historico, creándola con el encabezado de Registros si falta."""
     ws = _get_worksheet()
     sh = ws.spreadsheet
     try:
@@ -417,10 +396,9 @@ def _get_worksheet_historico():
 
 
 def espejo_archivar() -> int:
-    """Mueve a Historico las filas 'Completo' con Fecha de Turno anterior al mes
-    actual. Mantiene liviana la hoja Registros para que las actualizaciones
-    espejo (que la leen completa) sigan siendo rápidas. Copia primero y borra
-    después, por rangos contiguos de mayor a menor índice."""
+    """Mueve a Historico las filas 'Completo' anteriores al mes actual, para que
+    las actualizaciones espejo, que leen Registros completa, sigan siendo
+    rápidas. Copia primero y borra después, por rangos contiguos descendentes."""
     ws = _get_worksheet()
     all_values = ws.get_all_values()
     if len(all_values) < 2:

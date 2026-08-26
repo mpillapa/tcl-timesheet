@@ -1,25 +1,13 @@
--- Habilitar Row-Level Security en las tablas del schema public
--- ---------------------------------------------------------------------------
--- Contexto: el advisor de Supabase reporta `rls_disabled_in_public` sobre las
--- tablas `turnos` y `horas_esperadas`. Sin RLS, cualquiera que tenga la URL del
--- proyecto y la clave anonima (que por diseno es publica, viaja en clientes web)
--- puede leer, modificar y borrar esas tablas a traves de la API REST
--- (PostgREST), sin pasar por la aplicacion.
+-- Habilitar Row-Level Security en las tablas del schema public.
 --
--- Por que esto NO rompe la aplicacion:
--- La app no usa la API REST de Supabase. Conecta por Postgres directo
--- (SQLAlchemy + pooler, ver core/db.py) con el rol `postgres`, que en Supabase
--- tiene el atributo BYPASSRLS. Las politicas de RLS no se le aplican. Lo mismo
--- vale para `service_role`. RLS solo afecta a `anon` y `authenticated`, roles
--- que esta aplicacion nunca usa.
---
--- Habilitar RLS sin crear ninguna politica es la configuracion mas restrictiva
--- posible: deniega todo a anon/authenticated. Si en el futuro alguna aplicacion
--- necesita entrar por la API REST, habra que escribir politicas explicitas.
+-- Sin RLS, cualquiera con la URL del proyecto y la clave anonima (que por
+-- diseno es publica) puede leer, modificar y borrar estas tablas por la API
+-- REST, sin pasar por la aplicacion. Habilitarlo sin politicas no la rompe,
+-- porque conecta por Postgres directo con el rol `postgres`, que tiene
+-- BYPASSRLS. El detalle esta en seguridad/README.md.
 --
 -- Ejecutar en: Supabase Dashboard > SQL Editor (proyecto proyectos-tcl-uio).
--- Reversible: ver el bloque de reversion al final.
--- ---------------------------------------------------------------------------
+-- Reversible: ver el bloque del final.
 
 -- Paso 0. Verificacion previa. Anota el resultado antes de cambiar nada.
 select n.nspname  as esquema,
@@ -37,8 +25,7 @@ alter table public.turnos           enable row level security;
 alter table public.horas_esperadas  enable row level security;
 
 -- Paso 2. Quitar los permisos que Supabase concede por defecto a los roles de
--- la API. RLS ya bloquea las filas; esto ademas evita que la tabla siquiera
--- aparezca como accesible. Defensa en profundidad.
+-- la API, para que la tabla no aparezca ni como accesible.
 revoke all on public.turnos          from anon, authenticated;
 revoke all on public.horas_esperadas from anon, authenticated;
 

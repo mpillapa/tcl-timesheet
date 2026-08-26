@@ -1,11 +1,4 @@
-"""
-Marcador de Entrada y Salida - Horas Extra
-==========================================
-App Streamlit con persistencia en Google Sheets via st.connection.
-Esquema: UNA FILA POR TURNO (entrada y salida en la misma fila).
-Soporta turnos nocturnos usando Timestamps completos (YYYY-MM-DD HH:MM:SS).
-Incluye deteccion de olvidos y seccion de correccion manual.
-"""
+"""Punto de entrada de la app. Elige la vista según el rol autenticado."""
 
 import streamlit as st
 
