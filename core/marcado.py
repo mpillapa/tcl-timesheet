@@ -15,6 +15,8 @@ from core.data import (
     calcular_horas_efectivas,
     calcular_horas_extra,
     buscar_turno_abierto_idx,
+    ORIGEN_COLABORADOR,
+    ORIGEN_SISTEMA,
 )
 from core.employees import AREA_DE
 from core.time_utils import now_ecuador, parse_timestamp_flexible
@@ -53,8 +55,13 @@ def programar_cierre_sesion() -> None:
     st.session_state["auto_logout_started_at"] = time.time()
 
 
-def guardar_salida(nombre: str, ts_entrada_str: str, ts_salida, horas, observacion) -> bool:
-    """Cierra el turno (Nombre, Timestamp Entrada). False si ya no existe."""
+def guardar_salida(nombre: str, ts_entrada_str: str, ts_salida, horas, observacion,
+                   *, autor: str = None, origen: str = None) -> bool:
+    """Cierra el turno (Nombre, Timestamp Entrada). False si ya no existe.
+
+    Por defecto se atribuye al propio colaborador, que es el caso del quiosco.
+    El panel de admin pasa su usuario cuando cierra un turno en revisión, para
+    que la bitácora distinga un cierre propio de uno hecho por supervisión."""
     cambios = {
         "Timestamp Salida": ts_salida.strftime(TS_FMT),
         "Horas Trabajadas": horas,
@@ -63,7 +70,11 @@ def guardar_salida(nombre: str, ts_entrada_str: str, ts_salida, horas, observaci
         "Estado": "Completo",
         "Observaciones": observacion,
     }
-    return actualizar_por_entrada(nombre, ts_entrada_str, cambios)
+    return actualizar_por_entrada(
+        nombre, ts_entrada_str, cambios,
+        autor=autor if autor is not None else nombre,
+        origen=origen if origen is not None else ORIGEN_COLABORADOR,
+    )
 
 
 def marcar_entrada(nombre: str) -> None:
@@ -106,6 +117,8 @@ def marcar_entrada(nombre: str) -> None:
                     "Estado": ESTADO_REVISION,
                     "Observaciones": obs_nueva,
                 },
+                autor=nombre,
+                origen=ORIGEN_COLABORADOR,
             )
 
             if not actualizado:
@@ -191,7 +204,8 @@ def marcar_salida(nombre: str) -> None:
         )
         obs_nueva = f"{obs_prev} | {tag_revision}" if obs_prev else tag_revision
         if not actualizar_por_entrada(
-            nombre, ts_entrada_str, {"Estado": ESTADO_REVISION, "Observaciones": obs_nueva}
+            nombre, ts_entrada_str, {"Estado": ESTADO_REVISION, "Observaciones": obs_nueva},
+            autor=nombre, origen=ORIGEN_COLABORADOR,
         ):
             st.error("El turno ya no existe o no se pudo enviar a revisión. Refresca la página.")
             return
@@ -257,7 +271,9 @@ def barrer_turnos_olvidados(df) -> int:
             str(fila["Timestamp Entrada"]),
             {"Estado": ESTADO_REVISION, "Observaciones": obs_nueva},
         ))
-    return actualizar_varios_por_entrada(cambios)
+    return actualizar_varios_por_entrada(
+        cambios, autor="barrido_olvidados", origen=ORIGEN_SISTEMA
+    )
 
 
 def render_formulario_justificacion() -> None:

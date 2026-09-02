@@ -103,14 +103,16 @@ PROYECTO_HORAS_EXTRA/
 │   ├── auth.py             control de acceso y login por rol
 │   ├── employees.py        padrón de empleados desde secrets
 │   ├── normalizacion.py    limpieza de textos y timestamps
+│   ├── traza.py            formato del rastro de correcciones en Observaciones
 │   ├── time_utils.py       manejo de la zona horaria de Ecuador
 │   ├── ui_theme.py         paleta de marca y CSS compartido
 │   └── ui_utils.py         anti doble clic y mensajes diferidos
 ├── views/
 │   ├── colaborador.py      quiosco de marcación
 │   └── super_admin.py      panel administrativo
-├── migracion/              migración inicial de Sheets a Supabase y esquema SQL
+├── migracion/              esquema SQL y migración inicial de Sheets a Supabase
 ├── diagnostico/            script y bitácora de diagnóstico de conexión
+├── auditoria/              lectura de la bitácora de cambios y auditoría histórica
 ├── seguridad/              habilitación de RLS en Supabase
 └── .streamlit/
     ├── secrets.toml        credenciales locales, no se versiona
@@ -164,13 +166,25 @@ Supabase aparte y un padrón de prueba.
 
 ## Base de datos
 
-El esquema está en `migracion/schema.sql` y son dos tablas:
+Son tres tablas. Las dos primeras están en `migracion/schema.sql`:
 
 - `turnos`, con un registro por turno. La clave natural es el nombre más el
   timestamp de entrada, con un índice único que además evita que un doble clic
   duplique el turno. La columna `archivado` separa el mes activo del histórico.
 - `horas_esperadas`, con la meta de horas por año y mes. Se edita desde el Table
   Editor de Supabase.
+
+La tercera está en `migracion/auditoria_schema.sql`:
+
+- `turnos_auditoria`, la bitácora de cambios. Un trigger sobre `turnos` graba
+  cada modificación y cada borrado con la fila completa antes y después, el
+  usuario que lo hizo y el origen del cambio. Retención indefinida: es el
+  respaldo de las horas que recorta supervisión. La aplicación no escribe en
+  ella, solo deja el autor en la sesión con `core.data._sellar_autor`.
+
+  Se creó el 2026-09-02, después de una auditoría que no pudo responder cuántas
+  horas se habían modificado porque la base no guardaba el valor anterior. El
+  detalle está en [auditoria/README.md](auditoria/README.md).
 
 La conexión usa el Session pooler de Supabase en el puerto 5432. No lo cambies
 al pooler de transacción del puerto 6543: desde la red de la empresa ese puerto
@@ -181,7 +195,7 @@ Los tiempos límite del engine, los keepalives de TCP y el reintento de lecturas
 existen por un incidente concreto de cuelgues indefinidos. Antes de tocar esos
 valores, lee [diagnostico/README.md](diagnostico/README.md).
 
-RLS está habilitado en las dos tablas sin políticas, lo que cierra la API REST
+RLS está habilitado en las tres tablas sin políticas, lo que cierra la API REST
 de Supabase sin afectar a la aplicación, que conecta por Postgres directo. Ver
 [seguridad/README.md](seguridad/README.md).
 
@@ -200,6 +214,9 @@ local y no viajan por el repositorio. Cada push a `main` redespliega.
   2026-08-25, causa, arreglo y uso del script de diagnóstico.
 - [seguridad/README.md](seguridad/README.md): RLS en el schema público, qué
   expone el problema y por qué habilitarlo no rompe la aplicación.
+- [auditoria/README.md](auditoria/README.md): la bitácora de cambios y cómo
+  leerla, más la auditoría del 2026-09-02 que la motivó, con lo que se pudo
+  medir de las correcciones anteriores y lo que ya no se puede.
 
 ## Limitaciones conocidas
 
@@ -211,7 +228,16 @@ local y no viajan por el repositorio. Cada push a `main` redespliega.
 - Las horas esperadas del mes se cargan a mano en la tabla `horas_esperadas`.
 - El espejo en Google Sheets es unidireccional. Editar el Sheet a mano no
   cambia nada en la base.
-- No hay pruebas automatizadas.
+- La bitácora solo cubre desde el 2026-09-02. Lo anterior a esa fecha no tiene
+  valor previo registrado y no se puede reconstruir, salvo lo que ya quedó
+  medido en [auditoria/README.md](auditoria/README.md).
+- No hay regla de negocio que limite una corrección. Un administrador puede
+  reducir las horas de un turno cerrado sin tope y sin segunda aprobación.
+  Ahora queda registrado, pero no impedido.
+- No hay una vista de la bitácora en el panel. Se consulta desde Supabase o
+  con `auditoria/bitacora.py`.
+- No hay pruebas automatizadas. `auditoria/verificar_bitacora.py` y
+  `diagnostico/probar_conexion.py` son comprobaciones que se corren a mano.
 
 ## Licencia
 

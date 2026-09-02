@@ -22,7 +22,9 @@ from core.data import (
     calcular_horas_efectivas,
     calcular_horas_extra,
     buscar_turno_abierto_idx,
+    ORIGEN_ADMIN,
 )
+from core.traza import observacion_del_colaborador
 from core.employees import AREAS, EMPLEADOS_POR_AREA, AREA_DE
 from core.config import (
     UMBRAL_HORAS_EXTRA, UMBRAL_OLVIDO_H, TS_FMT, MIN_JUSTIF_CHARS, HORAS_BASE_TURNO,
@@ -1762,9 +1764,12 @@ def _dialogo_confirmar_correccion() -> None:
                 st.rerun()
                 return
             if modo == "cierre":
+                # Cierre hecho por supervisión, no marcación del colaborador:
+                # va a la bitácora con el usuario del admin.
                 if not guardar_salida(
                     emp, payload["ts_entrada_str"], payload["ts_sal"],
-                    payload["horas"], f"Registro manual: {payload['obs']}"
+                    payload["horas"], f"Registro manual: {payload['obs']}",
+                    autor=st.session_state.get("admin_user", ""), origen=ORIGEN_ADMIN,
                 ):
                     st.error("El turno ya no existe. Recarga la página.")
                     return
@@ -2162,12 +2167,15 @@ def _dialogo_confirmar_edicion() -> None:
 
     obs_nueva = payload["obs_nueva"]
     obs_orig = payload["obs_orig"]
-    if obs_nueva or obs_orig:
+    # Se muestra lo que realmente se va a preservar, no el texto crudo con los
+    # tags de correcciones anteriores.
+    obs_preservada = observacion_del_colaborador(obs_orig)
+    if obs_nueva or obs_preservada:
         st.divider()
         if obs_nueva:
             st.markdown(f"**Observación del admin:** {obs_nueva}")
-        if obs_orig:
-            st.caption(f"Observación original preservada: {obs_orig}")
+        if obs_preservada:
+            st.caption(f"Observación original preservada: {obs_preservada}")
 
     bc, bx = st.columns(2)
     with bc:
@@ -2178,8 +2186,13 @@ def _dialogo_confirmar_edicion() -> None:
             ahora = now_ecuador()
             admin_tag = f"[Corrección {ahora.strftime('%Y-%m-%d')} por {payload['admin_user']}]"
             obs_final = f"{admin_tag}: {obs_nueva}" if obs_nueva else admin_tag
-            if obs_orig:
-                obs_final += f" | [Orig]: {obs_orig}"
+            # Se preserva la observación del colaborador, no el tag de una
+            # corrección anterior: anidarlos hacía crecer el campo sin límite y
+            # dejaba la autoría mal atribuida al leer solo el tag externo. La
+            # historia completa vive ahora en turnos_auditoria.
+            obs_colaborador = observacion_del_colaborador(obs_orig)
+            if obs_colaborador:
+                obs_final += f" | [Orig]: {obs_colaborador}"
 
             h = payload["horas_nuevas"]
             cambios = {
@@ -2190,7 +2203,10 @@ def _dialogo_confirmar_edicion() -> None:
                 "Horas Extra": calcular_horas_extra(h),
                 "Observaciones": obs_final,
             }
-            ok = actualizar_por_entrada(payload["nombre"], payload["ts_entrada_str_orig"], cambios)
+            ok = actualizar_por_entrada(
+                payload["nombre"], payload["ts_entrada_str_orig"], cambios,
+                autor=payload["admin_user"], origen=ORIGEN_ADMIN,
+            )
             if ok:
                 set_flash(f"Turno de {payload['nombre']} corregido · {_dec_a_hhmm(h)} trabajadas")
                 st.session_state["_edit_pendiente"] = None
@@ -2368,7 +2384,12 @@ def _dialogo_confirmar_borrado() -> None:
             if bloquear_doble_click("del_confirm"):
                 st.rerun()
                 return
-            ok = eliminar_por_entrada(payload["nombre"], payload["ts_entrada_str"])
+            # La fila borrada queda completa en la bitácora, con el admin que
+            # la eliminó. Es el caso que más importa auditar.
+            ok = eliminar_por_entrada(
+                payload["nombre"], payload["ts_entrada_str"],
+                autor=st.session_state.get("admin_user", ""), origen=ORIGEN_ADMIN,
+            )
             if ok:
                 set_flash(f"Turno de {payload['nombre']} ({payload['fecha']}) eliminado")
                 st.session_state["_del_pendiente"] = None

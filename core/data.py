@@ -45,6 +45,12 @@ _COLS_TS = {"Timestamp Entrada", "Timestamp Salida"}
 _COLS_NUM = {"Horas Trabajadas", "Horas Efectivas", "Horas Extra"}
 _COLS_FECHA = {"Fecha de Turno"}
 
+# Valores de `origen` que entiende la bitácora de auditoría. La lista completa,
+# con el significado de cada uno, está en migracion/auditoria_schema.sql.
+ORIGEN_ADMIN = "admin"
+ORIGEN_COLABORADOR = "colaborador"
+ORIGEN_SISTEMA = "sistema"
+
 
 # ---------------------------------------------------------------------------
 # Conversión de valores app <-> SQL
@@ -282,11 +288,34 @@ def _con_fecha_turno_derivada(cambios: dict) -> dict:
     return nuevo
 
 
-def actualizar_por_entrada(nombre: str, ts_entrada_str: str, cambios: dict) -> bool:
+def _sellar_autor(conn, autor: str, origen: str) -> None:
+    """Deja el autor del cambio en la sesión, para que el trigger de auditoría
+    lo grabe en turnos_auditoria (ver migracion/auditoria_schema.sql).
+
+    El tercer argumento de set_config en `true` lo hace local a la transacción,
+    de modo que no se filtra a la siguiente petición que reutilice la misma
+    conexión del pool. Si no se sella, el trigger registra el cambio con
+    origen = 'fuera_de_la_app', que es la señal de una edición hecha por fuera
+    de la aplicación.
+    """
+    conn.execute(
+        text("select set_config('app.usuario', :u, true), "
+             "       set_config('app.origen',  :o, true)"),
+        {"u": _normalizar_texto(autor)[:120], "o": origen},
+    )
+
+
+def actualizar_por_entrada(nombre: str, ts_entrada_str: str, cambios: dict,
+                           *, autor: str, origen: str) -> bool:
     """Actualiza solo las columnas de `cambios` en la fila (Nombre, Timestamp
     Entrada). False si la fila no existe. `cambios` puede traer un Timestamp
     Entrada nuevo: la fila se localiza por el original y la Fecha de Turno se
-    recalcula sola (ver _con_fecha_turno_derivada)."""
+    recalcula sola (ver _con_fecha_turno_derivada).
+
+    `autor` y `origen` son obligatorios y por nombre: van a la bitácora de
+    auditoría, y se exigen para que un sitio de llamada nuevo falle en vez de
+    registrar el cambio sin responsable.
+    """
     ts = _a_ts(ts_entrada_str)
     if ts is None:
         return False
@@ -297,6 +326,7 @@ def actualizar_por_entrada(nombre: str, ts_entrada_str: str, cambios: dict) -> b
     params["w_nombre"] = _normalizar_cmp(nombre)
     params["w_ts"] = ts
     with get_engine().begin() as conn:
+        _sellar_autor(conn, autor, origen)
         res = conn.execute(
             text(f"UPDATE turnos SET {set_sql} "
                  "WHERE lower(nombre) = :w_nombre AND ts_entrada = :w_ts"),
@@ -310,9 +340,13 @@ def actualizar_por_entrada(nombre: str, ts_entrada_str: str, cambios: dict) -> b
     return True
 
 
-def actualizar_varios_por_entrada(cambios_por_entrada: list) -> int:
+def actualizar_varios_por_entrada(cambios_por_entrada: list,
+                                  *, autor: str, origen: str) -> int:
     """Aplica varios cambios en una sola transacción. Cada elemento es
-    (nombre, ts_entrada_str, cambios). Devuelve cuántas filas se actualizaron."""
+    (nombre, ts_entrada_str, cambios). Devuelve cuántas filas se actualizaron.
+
+    Todos los cambios del lote comparten autor, que es el caso real de uso: un
+    barrido automático o una acción de un admin sobre varias filas."""
     if not cambios_por_entrada:
         return 0
     # Derivar la lista antes hace que el UPDATE y el espejo escriban lo mismo.
@@ -322,6 +356,8 @@ def actualizar_varios_por_entrada(cambios_por_entrada: list) -> int:
     ]
     actualizados = 0
     with get_engine().begin() as conn:
+        # Una sola vez: es local a la transacción y cubre todo el lote.
+        _sellar_autor(conn, autor, origen)
         for nombre, ts_entrada_str, cambios in cambios_por_entrada:
             ts = _a_ts(ts_entrada_str)
             if ts is None:
@@ -344,12 +380,17 @@ def actualizar_varios_por_entrada(cambios_por_entrada: list) -> int:
     return actualizados
 
 
-def eliminar_por_entrada(nombre: str, ts_entrada_str: str) -> bool:
-    """Elimina la fila que matchea (Nombre, Timestamp Entrada). Destructivo."""
+def eliminar_por_entrada(nombre: str, ts_entrada_str: str,
+                         *, autor: str, origen: str) -> bool:
+    """Elimina la fila que matchea (Nombre, Timestamp Entrada). Destructivo.
+
+    La fila borrada queda completa en turnos_auditoria, que no tiene foreign
+    key contra turnos justamente para sobrevivir a este caso."""
     ts = _a_ts(ts_entrada_str)
     if ts is None:
         return False
     with get_engine().begin() as conn:
+        _sellar_autor(conn, autor, origen)
         res = conn.execute(
             text("DELETE FROM turnos WHERE lower(nombre) = :n AND ts_entrada = :t"),
             {"n": _normalizar_cmp(nombre), "t": ts},
@@ -385,6 +426,11 @@ def archivar_historico(solo_un_mes: bool) -> dict:
             return {"archivadas": 0, "bloqueado": True, "meses": meses}
 
         with get_engine().begin() as conn:
+            # El trigger de auditoría ignora los cambios que solo tocan
+            # `archivado` y `actualizado_en`, así que este UPDATE en bloque no
+            # ensucia la bitácora. Se sella igual, para que quede atribuido si
+            # algún día la condición del trigger se amplía.
+            _sellar_autor(conn, "archivado_mensual", ORIGEN_SISTEMA)
             res = conn.execute(
                 text("UPDATE turnos SET archivado = true, actualizado_en = now() "
                      "WHERE archivado = false AND lower(estado) = 'completo' "
