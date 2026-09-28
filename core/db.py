@@ -96,6 +96,18 @@ def _leer_url_db() -> str:
     return str(cfg["connections"]["supabase"]["url"]).strip()
 
 
+def _con_driver_psycopg2(url: str) -> str:
+    """Fija psycopg2 como driver si la URL no nombra ninguno.
+
+    Sin driver explícito, SQLAlchemy elige el suyo por defecto, y desde la 2.1
+    ese defecto es psycopg 3, que no está instalado. Pasó el 2026-09-28 tras un
+    reinicio en Streamlit Cloud; ver diagnostico/README.md."""
+    for esquema in ("postgresql://", "postgres://"):
+        if url.startswith(esquema):
+            return "postgresql+psycopg2://" + url[len(esquema):]
+    return url
+
+
 def get_engine():
     """Engine de SQLAlchemy, cacheado a nivel de proceso.
 
@@ -103,7 +115,7 @@ def get_engine():
     propio ping se queda esperando sin límite. De ahí los keepalives."""
     global _engine
     if _engine is None:
-        url = _leer_url_db()
+        url = _con_driver_psycopg2(_leer_url_db())
         if not url:
             raise RuntimeError(
                 "Falta la URL de la base de datos en secrets "

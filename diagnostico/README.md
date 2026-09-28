@@ -98,6 +98,34 @@ ese caso la aplicación lo dirá en vez de quedarse pensando.
 Si el cuelgue se repitiera pese a esto, la causa es otra y habrá un mensaje
 concreto que leer en los logs de Streamlit Cloud.
 
+## Incidente del 2026-09-28: "No module named 'psycopg'"
+
+### Síntoma
+
+Al marcar una entrada, la aplicación en Streamlit Cloud mostró
+`ModuleNotFoundError: No module named 'psycopg'` desde `get_engine()`. Apareció
+justo después de agregar un colaborador nuevo en los secrets, pero esa línea no
+tenía nada que ver.
+
+### La causa
+
+`requirements.txt` pedía `sqlalchemy` sin versión. Editar los secrets reinicia
+la aplicación, y el reinicio instaló una SQLAlchemy más reciente. Desde la 2.1,
+una URL `postgresql://` sin driver usa psycopg 3 (`psycopg`) en vez de psycopg2.
+Solo `psycopg2-binary` está instalado.
+
+### El arreglo
+
+- `requirements.txt`: `sqlalchemy>=2.0,<2.1`, para que una versión nueva no
+  entre sin probarla.
+- `core/db.py`: `_con_driver_psycopg2()` convierte `postgresql://` en
+  `postgresql+psycopg2://` antes de crear el engine. Así el driver no depende
+  del valor por defecto de SQLAlchemy ni de cómo esté escrita la URL en los
+  secrets. Si la URL ya nombra un driver, se respeta.
+
+Pasarse a psycopg 3 queda como opción, pero exige revisar los `connect_args`
+(keepalives, `tcp_user_timeout`) y probar contra la base antes de hacerlo.
+
 ## Uso del script
 
 ```
