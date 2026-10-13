@@ -66,11 +66,11 @@ SQL_RESUMEN = f"""
 select origen,
        count(*)                                  as cambios,
        count(distinct turno_id)                  as turnos,
-       count(*) filter (where accion = 'DELETE')  as borrados,
+       count(*) filter (where (accion = 'DELETE' or coalesce((despues ->> 'anulado')::boolean, false)))  as borrados,
        count(*) filter (where {_RECORTE})         as recortes,
        round(sum(delta_horas) filter (where {_RECORTE})::numeric, 2) as horas_recortadas,
        round(sum(delta_horas) filter (where {_ALZA})::numeric, 2)    as horas_sumadas,
-       round(sum(horas_antes) filter (where accion = 'DELETE')::numeric, 2) as horas_borradas,
+       round(sum(horas_antes) filter (where (accion = 'DELETE' or coalesce((despues ->> 'anulado')::boolean, false)))::numeric, 2) as horas_borradas,
        min(momento) as primero,
        max(momento) as ultimo
 from turnos_auditoria
@@ -84,11 +84,11 @@ select usuario, origen,
        count(*) as cambios,
        count(distinct turno_id) as turnos,
        count(distinct nombre) as personas,
-       count(*) filter (where accion = 'DELETE') as borrados,
+       count(*) filter (where (accion = 'DELETE' or coalesce((despues ->> 'anulado')::boolean, false))) as borrados,
        count(*) filter (where {_RECORTE}) as recortes,
        round(sum(delta_horas) filter (where {_RECORTE})::numeric, 2) as horas_recortadas,
        round(sum(delta_horas) filter (where {_ALZA})::numeric, 2)    as horas_sumadas,
-       round(sum(horas_antes) filter (where accion = 'DELETE')::numeric, 2) as horas_borradas
+       round(sum(horas_antes) filter (where (accion = 'DELETE' or coalesce((despues ->> 'anulado')::boolean, false)))::numeric, 2) as horas_borradas
 from turnos_auditoria
 where true {{FILTRO}}
 group by 1, 2
@@ -115,7 +115,7 @@ select momento, usuario, origen, nombre, fecha_turno,
        antes ->> 'ts_salida'     as salida,
        antes ->> 'observaciones' as observaciones
 from turnos_auditoria
-where accion = 'DELETE' {FILTRO}
+where (accion = 'DELETE' or coalesce((despues ->> 'anulado')::boolean, false)) {FILTRO}
 order by momento desc
 """
 

@@ -1,0 +1,285 @@
+# Migraciones de la base de datos
+
+Esta carpeta lleva la base del turnero de un esquema que se pegaba a mano en el
+SQL Editor a migraciones versionadas, probadas y con un orden de despliegue.
+El motivo está en [auditoria/README.md](../auditoria/README.md): en septiembre
+de 2026 se quitaron 38.43 h extra de turnos ya marcados, una parte con el mes
+cerrado, sin motivo escrito o reescribiendo el horario entero, y la base
+permitía todo eso sin dejar más rastro que la bitácora.
+
+Lo que sigue es un prototipo en proceso de endurecimiento, no un sistema
+productivo aprobado por Tecnología. La última sección dice qué falta para eso.
+
+## Qué cambia
+
+| Antes | Después |
+|---|---|
+| La aplicación conecta como `postgres`, dueño de todo | Conecta como `turnero_app`, que no puede borrar, ni tocar la bitácora, ni ver el esquema `herramientas` de la otra aplicación del proyecto |
+| Eliminar un turno es un `DELETE` | Se anula: queda con quién, cuándo y por qué |
+| Las horas son columnas que cualquiera escribe | La base las calcula desde el horario |
+| Corregir es sobrescribir la fila | Es un ajuste con motivo; si quita 1 h extra o más, lo aprueba otra persona |
+| La marcación del colaborador se pierde al corregir | Se guarda aparte, en una tabla que no se puede editar |
+| La bitácora se puede borrar | Es de solo inserción, también para su dueño |
+| `archivado` no impide nada | Un mes cerrado rechaza cambios; reabrirlo queda registrado |
+| La persona es su nombre | Tiene un identificador en `empleados` |
+| Un permiso se reconoce por el texto de la observación | Tiene tipo y está atado a su solicitud en `ausencias` |
+| Las horas se guardan sin zona | Se guardan como instante (`timestamptz`) |
+| Los umbrales viven solo en el código | Están en `reglas_negocio`, con su estado de decisión |
+| Esquema pegado a mano, sin pruebas | Migraciones numeradas y 72 pruebas contra una base local |
+
+### Las tablas
+
+| Tabla | Para qué | Quién escribe |
+|---|---|---|
+| `turnos` | El turno vigente, el que se paga | La aplicación, con las validaciones de la base |
+| `marcaciones` | Lo que se marcó en el reloj, una vez por turno | Un trigger. Solo inserción |
+| `ajustes_turno` | Cada corrección y anulación, con motivo, antes, propuesta y revisión | Las funciones `solicitar_*`, `aprobar_ajuste`, `rechazar_ajuste` |
+| `turnos_auditoria` | Toda modificación de un turno, con autor, origen, motivo y ajuste | Un trigger. Solo inserción |
+| `periodos_nomina`, `periodos_eventos` | Estado de cada mes y cada cierre o reapertura | `cerrar_periodo`, `reabrir_periodo`. Los eventos son solo inserción |
+| `empleados` | Identidad de cada persona: nombre y área, sin PIN | Un trigger y `sincronizar_empleados.py` |
+| `ausencias` | La solicitud de un permiso, falta o vacaciones | El panel, en Eventualidades |
+| `reglas_negocio` | Jornada, umbrales y banderas | Nadie desde la aplicación; se cambia con un `update` a mano |
+
+## Las migraciones
+
+| Versión | Fase | Qué hace |
+|---|---|---|
+| [V000](versiones/V000__linea_base.sql) | A | El esquema actual de producción, reunido. En producción no cambia nada |
+| [V001](versiones/V001__reglas_de_negocio.sql) | A | `reglas_negocio` y las funciones de cálculo de horas |
+| [V002](versiones/V002__anulacion.sql) | A | Columnas de anulación e índice único parcial |
+| [V003](versiones/V003__bitacora_inmutable.sql) | A | Bitácora de solo inserción, con motivo e id de ajuste |
+| [V004](versiones/V004__horas_calculadas_y_validaciones.sql) | A | La base calcula horas y valida cada turno escrito |
+| [V005](versiones/V005__empleados.sql) | A | `empleados` y el vínculo desde `turnos` |
+| [V006](versiones/V006__ausencias.sql) | A | `ausencias` y la columna `evento` llena |
+| [V007](versiones/V007__periodos_de_nomina.sql) | A | Cierre y reapertura de meses |
+| [V008](versiones/V008__marcaciones.sql) | A | Marcaciones originales, con la carga de lo que se puede reconstruir |
+| [V009](versiones/V009__ajustes_con_aprobacion.sql) | A | Ajustes con motivo y aprobación |
+| [V010](versiones/V010__rol_de_la_aplicacion.sql) | A | El rol `turnero_app`, sin contraseña |
+| [V101](versiones/V101__exigir_ajustes_y_motivo.sql) | B | Enciende la obligación de ajuste y de motivo |
+| [V102](versiones/V102__horarios_con_zona.sql) | B | Entrada y salida a `timestamptz` |
+
+La fase A es compatible con la versión de la aplicación que está hoy en
+producción: se puede aplicar sin cortar el servicio. La fase B no: obliga a que
+toda corrección pase por un ajuste y la versión actual no los usa. Por eso va
+después de desplegar el código nuevo.
+
+Cada archivo explica en su encabezado el porqué de lo que hace. Una migración
+aplicada no se edita: el ejecutor guarda su checksum y se detiene si cambia. Para
+corregir algo se escribe una migración nueva.
+
+## Cómo se despliega
+
+Los pasos que escriben en producción están marcados. Ninguno se ha ejecutado
+todavía: todo lo de esta carpeta se probó solo contra una base local.
+
+### Paso 1. Pruebas locales
+
+Requiere PostgreSQL 17 instalado. Las pruebas levantan un servidor temporal,
+nunca leen la URL de producción y apagan el espejo de Google Sheets.
+
+```powershell
+.venv\Scripts\python.exe -m pip install -r requirements-dev.txt
+.venv\Scripts\python.exe -m pytest pruebas
+```
+
+Si PostgreSQL está en otra ruta: `$env:PG_BIN = "D:\ruta\a\PostgreSQL\17\bin"`.
+
+### Paso 2. Respaldo (escribe un archivo con datos de personas)
+
+Supabase guarda respaldos diarios según el plan, pero conviene uno propio justo
+antes. `pg_dump` viene con la instalación de PostgreSQL.
+
+```powershell
+$env:PGURL = .venv\Scripts\python.exe -c "import tomllib; print(tomllib.load(open('.streamlit/secrets.toml','rb'))['connections']['supabase']['url'])"
+& "C:\Program Files\PostgreSQL\17\bin\pg_dump.exe" --dbname="$env:PGURL" --schema=public -Fc -f "$HOME\respaldo_turnero_antes_de_migrar.dump"
+Remove-Item Env:PGURL
+```
+
+El archivo tiene datos laborales de personas identificadas. Va fuera del
+repositorio y se borra cuando la migración esté verificada.
+
+### Paso 3. Revisar lo que el histórico incumple (solo lectura)
+
+```powershell
+.venv\Scripts\python.exe migracion\validar_datos_existentes.py --desde-secrets --produccion
+```
+
+Al 2026-10-13 da cuatro hallazgos, ninguno bloquea la migración:
+
+- un turno de Velasco Rolando del 2026-04-24 de 37.9 h, que se cruza con el del
+  día siguiente: parece una salida olvidada;
+- dos registros de Mariscal Juan del 2026-07-26, a dos minutos de distancia y
+  con la misma duración: parece un turno contado dos veces;
+- un turno de Farinango Nelson del 2026-06-23 cuya entrada es del 24.
+
+Conviene que supervisión los revise. Corregirlos después de migrar es lo
+correcto: pasa por un ajuste y queda registrado.
+
+### Paso 4. Fase A (escribe en producción)
+
+```powershell
+.venv\Scripts\python.exe migracion\aplicar_migraciones.py --desde-secrets --produccion --plan
+.venv\Scripts\python.exe migracion\aplicar_migraciones.py --desde-secrets --produccion
+```
+
+La aplicación sigue funcionando igual. Lo que cambia desde este momento, aun con
+el código viejo: la base calcula las horas, rechaza turnos de más de 24 h o
+cruzados, guarda las marcaciones y no deja tocar la bitácora.
+
+### Paso 5. Contraseña del rol y prueba de conexión (escribe en producción)
+
+Generar una contraseña y fijarla desde el SQL Editor de Supabase:
+
+```powershell
+.venv\Scripts\python.exe -c "import secrets; print(secrets.token_urlsafe(32))"
+```
+
+```sql
+alter role turnero_app password 'LA_CONTRASEÑA_GENERADA';
+```
+
+En el `secrets.toml` local, cambiar la URL al rol nuevo. En el pooler de
+Supabase el usuario es `turnero_app.<referencia>`, con la misma referencia de
+proyecto que hoy acompaña a `postgres`:
+
+```toml
+url = "postgresql://turnero_app.xxxxxxxxxxxx:LA_CONTRASEÑA_GENERADA@aws-0-us-east-1.pooler.supabase.com:5432/postgres"
+```
+
+y probar:
+
+```powershell
+.venv\Scripts\python.exe diagnostico\probar_conexion.py
+```
+
+Este es el único paso que no se pudo probar en local: el formato del usuario
+del pooler para un rol propio es el que documenta Supabase, pero hay que
+confirmarlo contra el proyecto real. Si falla, la aplicación sigue con
+`postgres` y nada se rompe.
+
+### Paso 6. Sincronizar el padrón (escribe en producción)
+
+```powershell
+.venv\Scripts\python.exe migracion\sincronizar_empleados.py --desde-secrets --produccion
+.venv\Scripts\python.exe migracion\sincronizar_empleados.py --desde-secrets --produccion --aplicar
+```
+
+Sin `--aplicar` solo muestra los cambios. Copia nombre y área; el PIN no sale
+de secrets.
+
+### Paso 7. Desplegar la aplicación
+
+Con el commit y el push del código nuevo, Streamlit Cloud redespliega solo. En
+los secrets de Streamlit Cloud, que son independientes del archivo local:
+
+1. cambiar `[connections.supabase] url` a la de `turnero_app`;
+2. añadir los permisos `puede_aprobar`, `gestiona_periodos` y `ver_auditoria`
+   a quien corresponda (ver decisiones pendientes).
+
+El código nuevo funciona con cualquiera de las dos URL, así que el orden entre
+el push y el cambio de secrets no importa.
+
+### Paso 8. Fase B (escribe en producción)
+
+Solo con el código nuevo ya desplegado y verificado en el panel:
+
+```powershell
+.venv\Scripts\python.exe migracion\aplicar_migraciones.py --desde-secrets --produccion --fase B --plan
+.venv\Scripts\python.exe migracion\aplicar_migraciones.py --desde-secrets --produccion --fase B
+```
+
+Después, reiniciar la aplicación desde Streamlit Cloud para que ninguna conexión
+abierta conserve el tipo viejo de las columnas.
+
+### Paso 9. Comprobar
+
+- Un colaborador marca entrada y salida en el quiosco.
+- Un administrador corrige un turno quitando menos de 1 h extra: se aplica solo.
+- Otro corrige quitando más: queda esperando, y un tercero con
+  `puede_aprobar` lo ve en "Ajustes y auditoría" y lo aprueba.
+- La sección "Lo que se marcó contra lo que quedó" muestra esa corrección.
+- El análisis de septiembre da las mismas cifras que antes:
+  `.venv\Scripts\python.exe auditoria\analisis_mensual.py --mes 2026-09`.
+
+## Cómo volver atrás
+
+Fase A sin fase B: volver a desplegar la versión anterior de la aplicación
+basta. La base queda con las tablas nuevas, que la versión anterior ignora.
+
+Fase B, sin deshacer el tipo de columna:
+
+```sql
+update reglas_negocio set valor = 0
+where clave in ('exigir_ajuste_para_corregir', 'exigir_motivo_admin');
+```
+
+Deshacer V102 exige quitar y recrear los dos triggers que nombran las columnas,
+como hace la propia migración, y convertir de vuelta con
+`using ts_entrada at time zone 'America/Guayaquil'`. Con el código nuevo no hace
+falta: funciona con los dos tipos.
+
+Lo que no se vuelve atrás, a propósito: la bitácora, las marcaciones y los
+ajustes. Son el registro de lo que pasó.
+
+## Decisiones pendientes
+
+Las reglas de esta tabla están marcadas como `provisional` en
+`reglas_negocio`. Funcionan con el valor indicado, pero lo eligió Tecnología
+para poder construir el mecanismo. Cambiarlas es un `update` y no requiere
+desplegar nada.
+
+| Decisión | Valor provisional | Quién debería decidir |
+|---|---|---|
+| Desde cuántas horas extra quitadas un ajuste necesita aprobación | 1 h | Recursos Humanos con Operaciones |
+| Quién puede aprobar ajustes | Nadie hasta que se configure `puede_aprobar` | Recursos Humanos |
+| Quién cierra y reabre meses, y hasta qué día se cierra cada mes | Nadie hasta configurar `gestiona_periodos`; cierre manual | Recursos Humanos con Nómina |
+| Duración máxima de un turno | 24 h | Operaciones |
+| Largo mínimo del motivo | 10 caracteres | Recursos Humanos |
+| Si un permiso cuenta como horas en el comparativo | Cuenta, como hasta ahora | Recursos Humanos |
+| Cuánto tiempo se conserva la bitácora y quién la lee | Indefinido | Recursos Humanos y Legal; ver [seguridad/retencion_y_acceso.md](../seguridad/retencion_y_acceso.md) |
+
+Mientras nadie tenga `puede_aprobar`, los ajustes grandes quedan esperando sin
+que nadie los pueda resolver. Es intencional que no haya un aprobador por
+defecto, pero hay que configurarlo antes del paso 8.
+
+Para ver qué valores están vigentes:
+
+```sql
+select clave, valor, unidad, estado, decidido_por from reglas_negocio order by estado, clave;
+```
+
+## Personas creadas automáticamente
+
+Si un turno llega con un nombre que no está en `empleados`, la base crea la
+persona como `automatico` en vez de rechazar la marcación. Revisarlas cada
+tanto:
+
+```sql
+select nombre, area, creado_en from empleados where origen = 'automatico' order by creado_en desc;
+```
+
+El reporte del paso 3 también las lista.
+
+## Herramientas de esta carpeta
+
+| Archivo | Qué hace | Escribe |
+|---|---|---|
+| [aplicar_migraciones.py](aplicar_migraciones.py) | Aplica las versiones pendientes en orden | Sí |
+| [validar_datos_existentes.py](validar_datos_existentes.py) | Lista turnos que las reglas nuevas no admitirían | No |
+| [sincronizar_empleados.py](sincronizar_empleados.py) | Padrón de secrets a `empleados`, sin PIN | Con `--aplicar` |
+| [schema.sql](schema.sql), [auditoria_schema.sql](auditoria_schema.sql) | El esquema anterior. Histórico: lo reemplaza V000 | No se usan |
+| [migrar_sheets_a_supabase.py](migrar_sheets_a_supabase.py) | La migración original desde Google Sheets | Histórico |
+
+## Lo que esto no resuelve
+
+- El turnero sigue siendo un prototipo. Si sus horas van a alimentar la nómina
+  de forma oficial, necesita la evaluación de Tecnología: arquitectura,
+  autenticación, integración con el sistema de nómina, monitoreo y soporte.
+- La autenticación de administradores son usuarios y contraseñas en secrets,
+  y los colaboradores entran con un PIN derivado de su cédula. La base ahora
+  registra quién hizo qué, pero confía en el nombre que le pasa la aplicación.
+- Los permisos de cada administrador por área siguen en el código
+  (`AREAS_POR_ADMIN`), no en la base.
+- Las marcaciones anteriores a V008 son reconstruidas. Para turnos corregidos
+  antes del 2026-09-02, la marcación reconstruida puede ser ya el valor
+  corregido: antes de la bitácora no se guardaba el original.

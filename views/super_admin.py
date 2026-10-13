@@ -14,25 +14,29 @@ from core.data import (
     leer_historico,
     leer_horas_esperadas,
     append_registro,
-    append_registros_batch,
-    actualizar_por_entrada,
-    eliminar_por_entrada,
+    registrar_ausencia,
+    solicitar_correccion,
+    solicitar_anulacion,
     archivar_historico,
     calcular_horas,
     calcular_horas_efectivas,
     calcular_horas_extra,
     buscar_turno_abierto_idx,
+    ReglaDeNegocio,
     ORIGEN_ADMIN,
 )
+from views import auditoria_panel
 from core.traza import observacion_del_colaborador
 from core.employees import AREAS, EMPLEADOS_POR_AREA, AREA_DE
 from core.config import (
-    UMBRAL_HORAS_EXTRA, UMBRAL_OLVIDO_H, TS_FMT, MIN_JUSTIF_CHARS, HORAS_BASE_TURNO,
+    UMBRAL_OLVIDO_H, TS_FMT, MIN_JUSTIF_CHARS, HORAS_BASE_TURNO,
     SCOPE_POR_PADRON_VIGENTE,
 )
 from core.normalizacion import _normalizar_cmp, _normalizar_serie
 from core.marcado import guardar_salida, barrer_turnos_olvidados
-from core.time_utils import now_ecuador, today_ecuador, parse_timestamp_flexible, parse_fecha_flexible
+from core.time_utils import (
+    now_ecuador, today_ecuador, parse_timestamp_flexible, parse_fecha_flexible, conservar_segundos,
+)
 from core.ui_utils import bloquear_doble_click, set_flash, mostrar_flash
 
 
@@ -1730,7 +1734,7 @@ def _dialogo_confirmar_correccion() -> None:
         filas_html += [
             _fila("Acción", "Registro de ENTRADA manual — turno quedará abierto"),
             _fila("Fecha / Hora entrada", ts_in.strftime("%d/%m/%Y  %H:%M"), BRAND_RED),
-            _fila("Observación", "Registro manual: entrada registrada por administrador"),
+            _fila("Observación", f"Registro manual: {payload['obs']}"),
         ]
 
     else:
@@ -1763,48 +1767,15 @@ def _dialogo_confirmar_correccion() -> None:
             if bloquear_doble_click("corr_confirm"):
                 st.rerun()
                 return
-            if modo == "cierre":
-                # Cierre hecho por supervisión, no marcación del colaborador:
-                # va a la bitácora con el usuario del admin.
-                if not guardar_salida(
-                    emp, payload["ts_entrada_str"], payload["ts_sal"],
-                    payload["horas"], f"Registro manual: {payload['obs']}",
-                    autor=st.session_state.get("admin_user", ""), origen=ORIGEN_ADMIN,
-                ):
-                    st.error("El turno ya no existe. Recarga la página.")
-                    return
-                flash_msg = f"Turno cerrado para {emp} · {payload['horas']:.2f} h trabajadas"
-            elif modo == "entrada":
-                ts_in = payload["ts_in"]
-                append_registro({
-                    "Nombre": emp,
-                    "Area": AREA_DE.get(emp, ""),
-                    "Fecha de Turno": ts_in.strftime("%Y-%m-%d"),
-                    "Timestamp Entrada": ts_in.strftime(TS_FMT),
-                    "Timestamp Salida": "",
-                    "Horas Trabajadas": "",
-                    "Horas Efectivas": "",
-                    "Horas Extra": "",
-                    "Estado": "Abierto",
-                    "Observaciones": "Registro manual: entrada registrada por administrador",
-                })
-                flash_msg = f"Entrada manual registrada para {emp} · {ts_in.strftime('%d/%m %H:%M')}"
-            else:
-                ts_in, ts_out = payload["ts_in"], payload["ts_out"]
-                horas = payload["horas"]
-                append_registro({
-                    "Nombre": emp,
-                    "Area": AREA_DE.get(emp, ""),
-                    "Fecha de Turno": ts_in.strftime("%Y-%m-%d"),
-                    "Timestamp Entrada": ts_in.strftime(TS_FMT),
-                    "Timestamp Salida": ts_out.strftime(TS_FMT),
-                    "Horas Trabajadas": horas,
-                    "Horas Efectivas": calcular_horas_efectivas(horas),
-                    "Horas Extra": calcular_horas_extra(horas),
-                    "Estado": "Completo",
-                    "Observaciones": f"Registro manual: {payload['obs']}",
-                })
-                flash_msg = f"Registro histórico creado para {emp} · {horas:.2f} h trabajadas"
+            admin_user = st.session_state.get("admin_user", "")
+            try:
+                flash_msg = _guardar_registro_manual(modo, emp, payload, admin_user)
+            except ReglaDeNegocio as e:
+                st.error(str(e))
+                return
+            if flash_msg is None:
+                st.error("El turno ya no existe o ya estaba registrado. Recarga la página.")
+                return
             set_flash(flash_msg)
             st.session_state["_corr_pendiente"] = None
             st.session_state["_corr_rev"] = st.session_state.get("_corr_rev", 0) + 1
@@ -1815,12 +1786,62 @@ def _dialogo_confirmar_correccion() -> None:
             st.rerun()
 
 
+def _guardar_registro_manual(modo: str, emp: str, payload: dict, admin_user: str):
+    """Escribe el registro manual confirmado. Devuelve el mensaje para el
+    usuario, o None si el turno ya no existe. El detalle que escribió el
+    administrador va como motivo a la bitácora y a la marcación."""
+    motivo = payload["obs"]
+    if modo == "cierre":
+        # Cierre hecho por supervisión, no marcación del colaborador: va a la
+        # bitácora con el usuario del admin.
+        if not guardar_salida(
+            emp, payload["ts_entrada_str"], payload["ts_sal"],
+            payload["horas"], f"Registro manual: {motivo}",
+            autor=admin_user, origen=ORIGEN_ADMIN, motivo=motivo,
+        ):
+            return None
+        return f"Turno cerrado para {emp} · {payload['horas']:.2f} h trabajadas"
+    if modo == "entrada":
+        ts_in = payload["ts_in"]
+        if not append_registro({
+                    "Nombre": emp,
+                    "Area": AREA_DE.get(emp, ""),
+                    "Fecha de Turno": ts_in.strftime("%Y-%m-%d"),
+                    "Timestamp Entrada": ts_in.strftime(TS_FMT),
+                    "Timestamp Salida": "",
+                    "Horas Trabajadas": "",
+                    "Horas Efectivas": "",
+                    "Horas Extra": "",
+                    "Estado": "Abierto",
+                    "Observaciones": f"Registro manual: {motivo}",
+        }, autor=admin_user, origen=ORIGEN_ADMIN, motivo=motivo):
+            return None
+        return f"Entrada manual registrada para {emp} · {ts_in.strftime('%d/%m %H:%M')}"
+    ts_in, ts_out = payload["ts_in"], payload["ts_out"]
+    horas = payload["horas"]
+    if not append_registro({
+                    "Nombre": emp,
+                    "Area": AREA_DE.get(emp, ""),
+                    "Fecha de Turno": ts_in.strftime("%Y-%m-%d"),
+                    "Timestamp Entrada": ts_in.strftime(TS_FMT),
+                    "Timestamp Salida": ts_out.strftime(TS_FMT),
+                    "Horas Trabajadas": horas,
+                    "Horas Efectivas": calcular_horas_efectivas(horas),
+                    "Horas Extra": calcular_horas_extra(horas),
+                    "Estado": "Completo",
+                    "Observaciones": f"Registro manual: {motivo}",
+    }, autor=admin_user, origen=ORIGEN_ADMIN, motivo=motivo):
+        return None
+    return f"Registro histórico creado para {emp} · {horas:.2f} h trabajadas"
+
+
 def _render_correcciones(areas_permitidas=None, df_filt=None) -> None:
     """Cierre de turnos en revisión, registro manual, edición y borrado.
     `df_filt` son los registros ya filtrados del dashboard."""
     st.caption(
-        "Úsalo cuando un empleado olvidó marcar entrada, salida o ambas. "
-        "Toda corrección queda registrada en 'Observaciones' con el prefijo 'Registro manual:' para auditoría."
+        "Úsalo cuando un empleado olvidó marcar entrada, salida o ambas. Todo cambio "
+        "pide un motivo, queda en la bitácora con tu usuario y no reemplaza lo que el "
+        "colaborador marcó en el reloj, que se guarda aparte."
     )
 
     if areas_permitidas is None:
@@ -1910,7 +1931,7 @@ def _render_correcciones(areas_permitidas=None, df_filt=None) -> None:
             "Registrar entrada manual (sin salida aún)",
             "Crear registro histórico completo (olvido de ENTRADA y/o SALIDA)",
             "Editar un turno ya cerrado",
-            "Eliminar un turno (borrado definitivo)",
+            "Anular un turno (queda registrado, no se borra)",
         ],
         key="modo_corr",
     )
@@ -1966,8 +1987,8 @@ def _render_correcciones(areas_permitidas=None, df_filt=None) -> None:
                 det = obs_det.strip()
                 if f_sal is None:
                     st.error("Selecciona una fecha de salida.")
-                elif not det:
-                    st.error("Ingresa un detalle válido en la observación.")
+                elif len(det) < MIN_JUSTIF_CHARS:
+                    st.error(f"El detalle es el motivo del cierre manual: escribe al menos {MIN_JUSTIF_CHARS} caracteres.")
                 else:
                     ts_sal = datetime.combine(f_sal, h_sal)
                     if ts_sal <= ts_ent:
@@ -1978,11 +1999,6 @@ def _render_correcciones(areas_permitidas=None, df_filt=None) -> None:
                             st.warning(
                                 f"El turno tiene **{horas:.2f} h**. "
                                 "Marca la casilla de confirmación antes de cerrar."
-                            )
-                        elif horas > UMBRAL_HORAS_EXTRA and len(det) < MIN_JUSTIF_CHARS:
-                            st.error(
-                                f"Las {horas} h exceden {UMBRAL_HORAS_EXTRA} h. "
-                                f"El detalle debe tener al menos {MIN_JUSTIF_CHARS} caracteres."
                             )
                         else:
                             st.session_state["_corr_pendiente"] = {
@@ -2006,10 +2022,16 @@ def _render_correcciones(areas_permitidas=None, df_filt=None) -> None:
                 f_ent = st.date_input("Fecha de entrada", value=None, key=f"f_ent_manual_{rev}")
             with c2:
                 h_ent = _time_input("Hora de entrada", time(0, 0), f"h_ent_manual_{rev}")
+            motivo_ent = st.text_input(
+                "Motivo", key=f"obs_ent_manual_{rev}",
+                placeholder="Ej.: el lector no registró la entrada, confirmado por el jefe de turno",
+            ).strip()
 
             if st.button("Registrar entrada", key=f"btn_ent_manual_{rev}"):
                 if f_ent is None:
                     st.error("Selecciona una fecha de entrada.")
+                elif len(motivo_ent) < MIN_JUSTIF_CHARS:
+                    st.error(f"Escribe el motivo con al menos {MIN_JUSTIF_CHARS} caracteres.")
                 else:
                     ts_in = datetime.combine(f_ent, h_ent)
                     if ts_in > now_ecuador():
@@ -2020,6 +2042,7 @@ def _render_correcciones(areas_permitidas=None, df_filt=None) -> None:
                             "emp": emp_corr,
                             "area": AREA_DE.get(emp_corr, ""),
                             "ts_in": ts_in,
+                            "obs": motivo_ent,
                         }
 
     elif modo.startswith("Crear"):
@@ -2048,36 +2071,29 @@ def _render_correcciones(areas_permitidas=None, df_filt=None) -> None:
             det = obs_det.strip()
             if f_ent is None or f_sal is None:
                 st.error("Selecciona fecha de entrada y salida.")
-            elif not det:
-                st.error("Ingresa un detalle válido en la observación.")
+            elif len(det) < MIN_JUSTIF_CHARS:
+                st.error(f"El detalle es el motivo del registro manual: escribe al menos {MIN_JUSTIF_CHARS} caracteres.")
             else:
                 ts_in = datetime.combine(f_ent, h_ent)
                 ts_out = datetime.combine(f_sal, h_sal)
                 if ts_out <= ts_in:
                     st.error("La salida debe ser posterior a la entrada.")
                 else:
-                    horas = calcular_horas(ts_in, ts_out)
-                    if horas > UMBRAL_HORAS_EXTRA and len(det) < MIN_JUSTIF_CHARS:
-                        st.error(
-                            f"Las {horas} h exceden {UMBRAL_HORAS_EXTRA} h. "
-                            f"El detalle debe tener al menos {MIN_JUSTIF_CHARS} caracteres."
-                        )
-                    else:
-                        st.session_state["_corr_pendiente"] = {
-                            "modo": "completo",
-                            "emp": emp_corr,
-                            "area": AREA_DE.get(emp_corr, ""),
-                            "ts_in": ts_in,
-                            "ts_out": ts_out,
-                            "horas": horas,
-                            "obs": det,
-                        }
+                    st.session_state["_corr_pendiente"] = {
+                        "modo": "completo",
+                        "emp": emp_corr,
+                        "area": AREA_DE.get(emp_corr, ""),
+                        "ts_in": ts_in,
+                        "ts_out": ts_out,
+                        "horas": calcular_horas(ts_in, ts_out),
+                        "obs": det,
+                    }
 
     elif modo.startswith("Editar"):
         _flujo_editar_turno(emp_corr, df_filt)
 
-    elif modo.startswith("Eliminar"):
-        _flujo_eliminar_turno(emp_corr, df_filt)
+    elif modo.startswith("Anular"):
+        _flujo_anular_turno(emp_corr, df_filt)
 
     if st.session_state.get("_corr_pendiente"):
         _dialogo_confirmar_correccion()
@@ -2185,7 +2201,7 @@ def _dialogo_confirmar_edicion() -> None:
                 return
             ahora = now_ecuador()
             admin_tag = f"[Corrección {ahora.strftime('%Y-%m-%d')} por {payload['admin_user']}]"
-            obs_final = f"{admin_tag}: {obs_nueva}" if obs_nueva else admin_tag
+            obs_final = f"{admin_tag}: {obs_nueva}"
             # Se preserva la observación del colaborador, no el tag de una
             # corrección anterior: anidarlos hacía crecer el campo sin límite y
             # dejaba la autoría mal atribuida al leer solo el tag externo. La
@@ -2195,25 +2211,30 @@ def _dialogo_confirmar_edicion() -> None:
                 obs_final += f" | [Orig]: {obs_colaborador}"
 
             h = payload["horas_nuevas"]
-            cambios = {
-                "Timestamp Entrada": ts_ent_nueva.strftime(TS_FMT),
-                "Timestamp Salida": ts_sal_nueva.strftime(TS_FMT),
-                "Horas Trabajadas": h,
-                "Horas Efectivas": calcular_horas_efectivas(h),
-                "Horas Extra": calcular_horas_extra(h),
-                "Observaciones": obs_final,
-            }
-            ok = actualizar_por_entrada(
-                payload["nombre"], payload["ts_entrada_str_orig"], cambios,
-                autor=payload["admin_user"], origen=ORIGEN_ADMIN,
-            )
-            if ok:
-                set_flash(f"Turno de {payload['nombre']} corregido · {_dec_a_hhmm(h)} trabajadas")
-                st.session_state["_edit_pendiente"] = None
-                st.session_state["_edit_rev"] = st.session_state.get("_edit_rev", 0) + 1
-                st.rerun()
+            # Un ajuste, no un UPDATE: la base decide si se aplica en el acto o
+            # si espera a otro administrador (migracion/versiones/V009).
+            try:
+                res = solicitar_correccion(
+                    payload["nombre"], payload["ts_entrada_str_orig"],
+                    ts_ent_nueva, ts_sal_nueva, obs_final,
+                    motivo=obs_nueva, autor=payload["admin_user"],
+                )
+            except ReglaDeNegocio as e:
+                st.error(str(e))
+                return
+            if res is None:
+                st.error("No se encontró el turno. Puede haber sido modificado. Recarga la página.")
+                return
+            if res["estado"] == "pendiente":
+                set_flash(
+                    f"Corrección de {payload['nombre']} enviada a aprobación: quita "
+                    f"{-res['delta_extra']:.2f} h extra y necesita la firma de otro administrador."
+                )
             else:
-                st.error("No se encontró el turno en la hoja. Puede haber sido modificado. Recarga la página.")
+                set_flash(f"Turno de {payload['nombre']} corregido · {_dec_a_hhmm(h)} trabajadas")
+            st.session_state["_edit_pendiente"] = None
+            st.session_state["_edit_rev"] = st.session_state.get("_edit_rev", 0) + 1
+            st.rerun()
     with bx:
         if st.button("Cancelar", use_container_width=True, key="edit_dlg_cancel"):
             st.session_state["_edit_pendiente"] = None
@@ -2227,10 +2248,11 @@ def _flujo_editar_turno(emp_corr, df: pd.DataFrame) -> None:
     rev = st.session_state.get("_edit_rev", 0)
 
     st.caption(
-        "Corrige un turno ya cerrado cuando el horario o las horas registradas no "
-        "corresponden. Solo se muestran turnos normales dentro de los filtros activos "
-        "(las eventualidades —vacaciones, faltas, permisos— no se editan aquí); "
-        "la observación original del funcionario se conserva."
+        "Corrige un turno ya cerrado cuando el horario no corresponde. Solo se "
+        "muestran turnos normales dentro de los filtros activos (las eventualidades "
+        "no se editan aquí). Lo que marcó el colaborador se conserva aparte. Si la "
+        "corrección quita horas extra por encima del umbral vigente, queda esperando "
+        "la aprobación de otro administrador."
     )
 
     if df is None or df.empty:
@@ -2314,7 +2336,7 @@ def _flujo_editar_turno(emp_corr, df: pd.DataFrame) -> None:
                              f"edit_h_sal_{rev}")
 
     obs_nueva = st.text_area(
-        "Motivo de la corrección (observación del administrador)",
+        f"Motivo de la corrección (obligatorio, al menos {MIN_JUSTIF_CHARS} caracteres)",
         key=f"edit_obs_{rev}",
         placeholder="Ej: Horario corregido por discrepancia confirmada con el supervisor...",
     )
@@ -2322,9 +2344,11 @@ def _flujo_editar_turno(emp_corr, df: pd.DataFrame) -> None:
     if st.button("Revisar cambios", type="primary", use_container_width=True, key=f"edit_btn_{rev}"):
         if f_ent is None or f_sal is None:
             st.error("Completa ambas fechas.")
+        elif len(obs_nueva.strip()) < MIN_JUSTIF_CHARS:
+            st.error(f"Escribe el motivo de la corrección con al menos {MIN_JUSTIF_CHARS} caracteres.")
         else:
-            ts_ent_nueva = datetime.combine(f_ent, h_ent)
-            ts_sal_nueva = datetime.combine(f_sal, h_sal)
+            ts_ent_nueva = conservar_segundos(ts_ent_orig, datetime.combine(f_ent, h_ent))
+            ts_sal_nueva = conservar_segundos(ts_sal_orig, datetime.combine(f_sal, h_sal))
             if ts_sal_nueva <= ts_ent_nueva:
                 st.error("La salida debe ser posterior a la entrada.")
             else:
@@ -2348,14 +2372,18 @@ def _flujo_editar_turno(emp_corr, df: pd.DataFrame) -> None:
         _dialogo_confirmar_edicion()
 
 
-@st.dialog("Eliminar turno", width="large")
-def _dialogo_confirmar_borrado() -> None:
+@st.dialog("Anular turno", width="large")
+def _dialogo_confirmar_anulacion() -> None:
     payload = st.session_state.get("_del_pendiente")
     if not payload:
         st.rerun()
         return
 
-    st.warning("Esta acción elimina el turno de forma definitiva. No se puede deshacer.")
+    st.warning(
+        "El turno deja de contar, pero no se borra: queda anulado con tu usuario y "
+        "el motivo. Si tenía horas extra por encima del umbral vigente, la anulación "
+        "espera la aprobación de otro administrador."
+    )
 
     def _fila(label: str, valor: str, color: str = BRAND_NAVY) -> str:
         return (
@@ -2374,43 +2402,52 @@ def _dialogo_confirmar_borrado() -> None:
         + _fila("Salida", payload["salida"])
         + _fila("Estado", payload["estado"])
         + _fila("Observaciones", payload["obs"] or "—")
+        + _fila("Motivo de la anulación", payload["motivo"], BRAND_RED)
         + "</div>",
         unsafe_allow_html=True,
     )
 
     bc, bx = st.columns(2)
     with bc:
-        if st.button("Eliminar definitivamente", type="primary", use_container_width=True, key="del_dlg_confirm"):
+        if st.button("Anular turno", type="primary", use_container_width=True, key="del_dlg_confirm"):
             if bloquear_doble_click("del_confirm"):
                 st.rerun()
                 return
-            # La fila borrada queda completa en la bitácora, con el admin que
-            # la eliminó. Es el caso que más importa auditar.
-            ok = eliminar_por_entrada(
-                payload["nombre"], payload["ts_entrada_str"],
-                autor=st.session_state.get("admin_user", ""), origen=ORIGEN_ADMIN,
-            )
-            if ok:
-                set_flash(f"Turno de {payload['nombre']} ({payload['fecha']}) eliminado")
-                st.session_state["_del_pendiente"] = None
-                st.session_state["_del_rev"] = st.session_state.get("_del_rev", 0) + 1
-                st.rerun()
+            try:
+                res = solicitar_anulacion(
+                    payload["nombre"], payload["ts_entrada_str"],
+                    motivo=payload["motivo"], autor=st.session_state.get("admin_user", ""),
+                )
+            except ReglaDeNegocio as e:
+                st.error(str(e))
+                return
+            if res is None:
+                st.error("No se encontró el turno. Puede haber sido modificado. Recarga la página.")
+                return
+            if res["estado"] == "pendiente":
+                set_flash(f"Anulación del turno de {payload['nombre']} ({payload['fecha']}) "
+                          "enviada a aprobación de otro administrador")
             else:
-                st.error("No se encontró el turno en la hoja. Puede haber sido modificado. Recarga la página.")
+                set_flash(f"Turno de {payload['nombre']} ({payload['fecha']}) anulado")
+            st.session_state["_del_pendiente"] = None
+            st.session_state["_del_rev"] = st.session_state.get("_del_rev", 0) + 1
+            st.rerun()
     with bx:
         if st.button("Cancelar", use_container_width=True, key="del_dlg_cancel"):
             st.session_state["_del_pendiente"] = None
             st.rerun()
 
 
-def _flujo_eliminar_turno(emp_corr, df: pd.DataFrame) -> None:
-    """Borrado definitivo de un turno mal ingresado. Muestra todos los turnos
-    del empleado en los filtros activos, eventualidades incluidas."""
+def _flujo_anular_turno(emp_corr, df: pd.DataFrame) -> None:
+    """Anulación de un turno mal ingresado. Muestra todos los turnos del
+    empleado en los filtros activos, eventualidades incluidas. Nada se borra:
+    el turno queda marcado como anulado (migracion/versiones/V002)."""
     rev = st.session_state.get("_del_rev", 0)
 
     st.caption(
-        "Borra un turno mal ingresado. Se muestran todos los turnos del funcionario "
-        "dentro de los filtros activos. El borrado es definitivo."
+        "Anula un turno mal ingresado. Se muestran todos los turnos del funcionario "
+        "dentro de los filtros activos. El turno anulado deja de contar, pero queda "
+        "registrado con tu usuario y el motivo."
     )
 
     if df is None or df.empty:
@@ -2458,7 +2495,16 @@ def _flujo_eliminar_turno(emp_corr, df: pd.DataFrame) -> None:
     if obs.lower() == "nan":
         obs = ""
 
-    if st.button("Eliminar turno seleccionado", type="primary", use_container_width=True, key=f"del_btn_{rev}"):
+    motivo_anul = st.text_area(
+        f"Motivo de la anulación (obligatorio, al menos {MIN_JUSTIF_CHARS} caracteres)",
+        key=f"del_motivo_{rev}",
+        placeholder="Ej.: turno duplicado por doble marcación, confirmado con el colaborador",
+    ).strip()
+
+    if st.button("Anular turno seleccionado", type="primary", use_container_width=True, key=f"del_btn_{rev}"):
+        if len(motivo_anul) < MIN_JUSTIF_CHARS:
+            st.error(f"Escribe el motivo de la anulación con al menos {MIN_JUSTIF_CHARS} caracteres.")
+            return
         st.session_state["_del_pendiente"] = {
             "nombre": emp_corr,
             "ts_entrada_str": ts_ent_dt.strftime(TS_FMT),
@@ -2467,10 +2513,11 @@ def _flujo_eliminar_turno(emp_corr, df: pd.DataFrame) -> None:
             "salida": pd.Timestamp(ts_sal_val).strftime("%Y-%m-%d %H:%M") if pd.notna(ts_sal_val) else "—",
             "estado": str(turno.get("Estado", "")),
             "obs": obs,
+            "motivo": motivo_anul,
         }
 
     if st.session_state.get("_del_pendiente"):
-        _dialogo_confirmar_borrado()
+        _dialogo_confirmar_anulacion()
 
 
 # --- Módulo de eventualidades ---
@@ -2571,7 +2618,14 @@ def _dialogo_confirmar_evento() -> None:
                     "Estado": "Completo",
                     "Observaciones": obs,
                 })
-            n_ins = append_registros_batch(filas_reg)
+            try:
+                n_ins = registrar_ausencia(
+                    emp, area, payload["tipo"], payload.get("subcat") or "", filas_reg,
+                    autor=payload["admin_user"], motivo=obs,
+                )
+            except ReglaDeNegocio as e:
+                st.error(str(e))
+                return
             set_flash(f"{n_ins} día(s) registrados para {emp} — {payload['tipo']}")
             st.session_state["_evt_pendiente"] = None
             st.session_state["_evt_rev"] = st.session_state.get("_evt_rev", 0) + 1
@@ -2788,6 +2842,11 @@ def vista_super_admin() -> None:
     df_dash = _preparar_df_dashboard(df_scope)
 
     # Que se vean de entrada, sin llegar hasta la pestaña de gestión.
+    if auditoria_panel.permiso(admin_user, "puede_aprobar"):
+        n_aj = auditoria_panel.contar_pendientes_para(admin_user, areas_permitidas)
+        if n_aj:
+            st.warning(f"Hay **{n_aj} ajuste(s)** de otros administradores esperando tu aprobación "
+                       "en la pestaña **Ajustes y auditoría**.")
     n_rev = int((df_dash["Estado"] == "Revision").sum())
     if n_rev:
         if solo_lectura:
@@ -2840,33 +2899,37 @@ def vista_super_admin() -> None:
                         set_flash(f"{_res['archivadas']} registro(s) archivados.")
                         st.rerun()
 
-    if solo_lectura:
-        tab_dash, tab_comp, tab_tabla = st.tabs([
-            "Dashboard",
-            "Comparativo horas esperadas",
-            "Tabla",
-        ])
-        with tab_dash:
-            _render_dashboard(df_filt, df_prev)
-        with tab_comp:
-            _render_comparativo_horas(df_filt, df_todo_meses)
-        with tab_tabla:
-            _render_tabla(df_filt)
-    else:
-        tab_dash, tab_comp, tab_tabla, tab_gestion, tab_evt = st.tabs([
-            "Dashboard",
-            "Comparativo horas esperadas",
-            "Tabla",
-            "Gestión de turnos",
-            "Eventualidades",
-        ])
-        with tab_dash:
-            _render_dashboard(df_filt, df_prev)
-        with tab_comp:
-            _render_comparativo_horas(df_filt, df_todo_meses)
-        with tab_tabla:
-            _render_tabla(df_filt)
-        with tab_gestion:
+    # La pestaña de ajustes y auditoría la ve quien puede aprobar, gestionar
+    # periodos o auditar, y quien puede corregir, para seguir sus solicitudes.
+    ver_auditoria = auditoria_panel.permiso(admin_user, "ver_auditoria")
+    gestiona_periodos = auditoria_panel.permiso(admin_user, "gestiona_periodos")
+    con_pestana_ajustes = (not solo_lectura) or ver_auditoria or gestiona_periodos
+
+    nombres = ["Dashboard", "Comparativo horas esperadas", "Tabla"]
+    if not solo_lectura:
+        nombres += ["Gestión de turnos", "Eventualidades"]
+    if con_pestana_ajustes:
+        nombres.append("Ajustes y auditoría")
+    pestanas = dict(zip(nombres, st.tabs(nombres)))
+
+    with pestanas["Dashboard"]:
+        _render_dashboard(df_filt, df_prev)
+    with pestanas["Comparativo horas esperadas"]:
+        _render_comparativo_horas(df_filt, df_todo_meses)
+    with pestanas["Tabla"]:
+        _render_tabla(df_filt)
+    if not solo_lectura:
+        with pestanas["Gestión de turnos"]:
             _render_correcciones(areas_permitidas=areas_permitidas, df_filt=df_filt)
-        with tab_evt:
+        with pestanas["Eventualidades"]:
             _render_eventualidades()
+    if con_pestana_ajustes:
+        with pestanas["Ajustes y auditoría"]:
+            if not solo_lectura:
+                auditoria_panel.render_ajustes_pendientes(admin_user, areas_permitidas)
+                st.divider()
+            if gestiona_periodos or ver_auditoria:
+                auditoria_panel.render_periodos(admin_user)
+                st.divider()
+            if ver_auditoria:
+                auditoria_panel.render_auditoria(areas_permitidas)

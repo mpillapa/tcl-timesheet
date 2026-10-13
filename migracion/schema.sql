@@ -1,3 +1,8 @@
+-- HISTÓRICO. Este archivo ya no se aplica: su contenido está en
+-- migracion/versiones/V000__linea_base.sql, y el esquema evoluciona con las
+-- migraciones de esa carpeta. Se conserva como registro, y porque
+-- pruebas/test_migraciones.py lo usa para simular la base anterior.
+--
 -- Esquema del turnero en PostgreSQL (Supabase).
 -- Idempotente: se puede ejecutar varias veces sin dañar nada.
 

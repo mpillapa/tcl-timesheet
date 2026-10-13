@@ -1,0 +1,805 @@
+<!doctype html>
+<html lang="es" data-theme="">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Quién cambió las horas</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Archivo:wght@400;500;600;700&family=IBM+Plex+Mono:wght@400;500;600&display=swap">
+<style>
+/* Tablero de auditoría: barra de filtros fija, resumen, dos rankings y la
+   tabla de cambios. Un solo acento azul para la magnitud; el rojo queda
+   reservado para el tramo de horas que desapareció, siempre con etiqueta. */
+:root {
+  color-scheme: light;
+  --plano:      #eef1f5;
+  --superficie: #ffffff;
+  --hundido:    #f7f8fa;
+  --tinta:      #10161d;
+  --tinta-2:    #4a5765;
+  --tinta-3:    #7b8794;
+  --linea:      #dde3ea;
+  --linea-dura: #c3ccd6;
+  --serie:      #2a78d6;
+  --perdida:    #d03b3b;
+  --aviso:      #b26a00;
+  --foco:       #2a78d6;
+  --sombra:     0 1px 2px rgba(16,22,29,.06), 0 8px 24px -16px rgba(16,22,29,.25);
+
+  --display: "Archivo", "Segoe UI", system-ui, sans-serif;
+  --cifra:   "IBM Plex Mono", ui-monospace, "Cascadia Mono", monospace;
+}
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    color-scheme: dark;
+    --plano:      #0d1116;
+    --superficie: #171d25;
+    --hundido:    #121820;
+    --tinta:      #e8edf3;
+    --tinta-2:    #a4b1c0;
+    --tinta-3:    #7d8a99;
+    --linea:      #262f3a;
+    --linea-dura: #37434f;
+    --serie:      #3987e5;
+    --perdida:    #d03b3b;
+    --aviso:      #e0a53c;
+    --foco:       #5aa9dc;
+    --sombra:     0 1px 2px rgba(0,0,0,.4), 0 8px 24px -16px rgba(0,0,0,.8);
+  }
+}
+:root[data-theme="dark"] {
+  color-scheme: dark;
+  --plano:      #0d1116;
+  --superficie: #171d25;
+  --hundido:    #121820;
+  --tinta:      #e8edf3;
+  --tinta-2:    #a4b1c0;
+  --tinta-3:    #7d8a99;
+  --linea:      #262f3a;
+  --linea-dura: #37434f;
+  --serie:      #3987e5;
+  --perdida:    #d03b3b;
+  --aviso:      #e0a53c;
+  --foco:       #5aa9dc;
+  --sombra:     0 1px 2px rgba(0,0,0,.4), 0 8px 24px -16px rgba(0,0,0,.8);
+}
+
+* { box-sizing: border-box; }
+html, body { margin: 0; }
+body {
+  background: var(--plano);
+  color: var(--tinta);
+  font-family: var(--display);
+  font-size: 15px;
+  line-height: 1.5;
+  -webkit-font-smoothing: antialiased;
+}
+.envoltura { max-width: 1180px; margin: 0 auto; padding-inline: 20px; padding-block: 0 72px; }
+
+/* --- Cabecera --- */
+.cabecera { padding-block: 34px 22px; display: flex; gap: 20px; align-items: flex-start; flex-wrap: wrap; }
+.cabecera h1 { font-size: clamp(26px, 4vw, 38px); font-weight: 700; letter-spacing: -.02em; margin: 0 0 6px; text-wrap: balance; }
+.cabecera p { margin: 0; color: var(--tinta-2); max-width: 62ch; }
+.cabecera .crece { flex: 1 1 320px; min-width: 0; }
+.reservado {
+  display: inline-flex; align-items: center; gap: 7px; margin-top: 12px;
+  font-size: 12px; letter-spacing: .04em; text-transform: uppercase;
+  color: var(--aviso); border: 1px solid currentColor; border-radius: 3px; padding: 3px 9px;
+}
+.btn-tema {
+  font: inherit; font-size: 13px; color: var(--tinta-2); background: var(--superficie);
+  border: 1px solid var(--linea); border-radius: 7px; padding: 7px 13px; cursor: pointer;
+}
+.btn-tema:hover { border-color: var(--linea-dura); color: var(--tinta); }
+
+/* --- Filtros --- */
+.filtros {
+  position: sticky; top: env(safe-area-inset-top, 0px); z-index: 20;
+  background: color-mix(in srgb, var(--plano) 92%, transparent);
+  backdrop-filter: blur(8px);
+  border-block: 1px solid var(--linea);
+  margin-inline: -20px; padding: 12px 20px;
+  display: flex; gap: 10px; flex-wrap: wrap; align-items: center;
+}
+.campo { display: flex; flex-direction: column; gap: 3px; min-width: 0; }
+.campo label { font-size: 11px; letter-spacing: .06em; text-transform: uppercase; color: var(--tinta-3); }
+.campo select, .campo input {
+  font: inherit; font-size: 14px; color: var(--tinta); background: var(--superficie);
+  border: 1px solid var(--linea); border-radius: 7px; padding: 7px 10px; min-width: 150px; max-width: 100%;
+}
+.campo input { min-width: 190px; }
+select:focus-visible, input:focus-visible, button:focus-visible, tr:focus-visible {
+  outline: 2px solid var(--foco); outline-offset: 2px;
+}
+.limpiar { align-self: flex-end; font: inherit; font-size: 13px; background: none; border: none; color: var(--serie); cursor: pointer; padding: 8px 4px; text-decoration: underline; }
+
+/* --- Resumen --- */
+.resumen { display: grid; grid-template-columns: repeat(auto-fit, minmax(188px, 1fr)); gap: 1px; background: var(--linea); border: 1px solid var(--linea); border-radius: 12px; overflow: hidden; margin-top: 26px; }
+.tile { background: var(--superficie); padding: 18px 20px; min-width: 0; }
+.tile .etiqueta { font-size: 12px; letter-spacing: .04em; text-transform: uppercase; color: var(--tinta-3); }
+.tile .valor { font-family: var(--cifra); font-size: 30px; font-weight: 600; letter-spacing: -.02em; margin-top: 4px; }
+.tile .pie { font-size: 13px; color: var(--tinta-2); margin-top: 2px; }
+.tile.principal .valor { color: var(--perdida); font-size: 40px; }
+
+/* --- Secciones --- */
+section { margin-top: 38px; }
+.titulo-seccion { display: flex; gap: 12px; align-items: baseline; flex-wrap: wrap; margin-bottom: 4px; }
+.titulo-seccion h2 { font-size: 19px; font-weight: 600; letter-spacing: -.01em; margin: 0; }
+.titulo-seccion .nota { font-size: 13px; color: var(--tinta-3); }
+.par { display: grid; grid-template-columns: repeat(auto-fit, minmax(330px, 1fr)); gap: 22px; align-items: start; }
+.tarjeta { background: var(--superficie); border: 1px solid var(--linea); border-radius: 12px; padding: 18px 20px 20px; box-shadow: var(--sombra); min-width: 0; }
+
+/* --- Barras --- */
+.barras { display: flex; flex-direction: column; gap: 11px; margin-top: 14px; }
+.barra { display: grid; grid-template-columns: minmax(0, 1fr); gap: 4px; }
+.barra .fila-1 { display: flex; justify-content: space-between; gap: 10px; align-items: baseline; font-size: 14px; min-width: 0; }
+.barra .quien { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.barra .monto { font-family: var(--cifra); font-weight: 600; font-variant-numeric: tabular-nums; white-space: nowrap; }
+.pista { height: 9px; background: var(--hundido); border-radius: 4px; overflow: hidden; }
+.relleno { height: 100%; background: var(--serie); border-radius: 0 4px 4px 0; min-width: 3px; transition: width .25s ease; }
+.barra .fila-2 { font-size: 12.5px; color: var(--tinta-3); display: flex; gap: 8px; flex-wrap: wrap; }
+.vacio { color: var(--tinta-3); font-size: 14px; padding: 14px 0; }
+
+/* --- Chips --- */
+.chip { display: inline-block; font-size: 11.5px; letter-spacing: .02em; padding: 2px 7px; border-radius: 4px; border: 1px solid var(--linea-dura); color: var(--tinta-2); white-space: nowrap; }
+.chip.alerta { border-color: var(--aviso); color: var(--aviso); }
+.chip.perdida { border-color: var(--perdida); color: var(--perdida); }
+
+/* --- Tabla --- */
+.marco-tabla { background: var(--superficie); border: 1px solid var(--linea); border-radius: 12px; overflow: hidden; box-shadow: var(--sombra); margin-top: 14px; }
+.desliza { overflow-x: auto; }
+table { border-collapse: collapse; width: 100%; font-size: 14px; }
+th, td { text-align: left; padding: 10px 14px; border-bottom: 1px solid var(--linea); vertical-align: top; white-space: nowrap; }
+thead th { font-size: 11.5px; letter-spacing: .05em; text-transform: uppercase; color: var(--tinta-3); font-weight: 600; background: var(--hundido); position: sticky; top: 0; }
+thead th.ordenable { cursor: pointer; user-select: none; }
+thead th.ordenable:hover { color: var(--tinta); }
+thead th .flecha { opacity: .45; font-size: 10px; }
+tbody tr.cambio { cursor: pointer; }
+tbody tr.cambio:hover { background: var(--hundido); }
+tbody tr.cambio:last-child td { border-bottom: none; }
+td.num { font-family: var(--cifra); font-variant-numeric: tabular-nums; }
+td .nombre { font-weight: 500; }
+.delta-baja { color: var(--perdida); font-weight: 600; }
+.delta-sube { color: var(--serie); font-weight: 600; }
+.sin-dato { color: var(--tinta-3); }
+
+/* --- Detalle --- */
+tr.detalle td { background: var(--hundido); padding: 18px 16px 22px; white-space: normal; }
+.detalle-rejilla { display: grid; grid-template-columns: repeat(auto-fit, minmax(290px, 1fr)); gap: 22px; }
+.detalle h3 { font-size: 13px; letter-spacing: .05em; text-transform: uppercase; color: var(--tinta-3); margin: 0 0 10px; font-weight: 600; }
+.motivo { font-size: 14px; color: var(--tinta); background: var(--superficie); border: 1px solid var(--linea); border-left: 3px solid var(--linea-dura); border-radius: 0 7px 7px 0; padding: 9px 12px; }
+.motivo.ausente { color: var(--aviso); border-left-color: var(--aviso); }
+
+/* Línea de tiempo del turno: mismas horas para las dos barras. */
+.reloj { margin-top: 2px; }
+.reloj .carril { display: grid; grid-template-columns: 58px minmax(0, 1fr); gap: 10px; align-items: center; margin-bottom: 7px; }
+.reloj .rotulo { font-size: 12px; color: var(--tinta-2); text-align: right; }
+.reloj .via { position: relative; height: 15px; background: var(--hundido); border-radius: 4px; border: 1px solid var(--linea); }
+.reloj .tramo { position: absolute; top: 0; bottom: 0; border-radius: 3px; }
+.reloj .tramo.base { background: var(--serie); }
+.reloj .tramo.quitado { background: var(--perdida); }
+.reloj .tramo.puesto { background: var(--serie); opacity: .55; }
+.reloj .ejes { display: grid; grid-template-columns: 58px minmax(0, 1fr); gap: 10px; }
+.reloj .marcas { display: flex; justify-content: space-between; font-family: var(--cifra); font-size: 11px; color: var(--tinta-3); }
+.leyenda { display: flex; gap: 14px; flex-wrap: wrap; font-size: 12.5px; color: var(--tinta-2); margin-top: 9px; }
+.aviso-movida { margin: 9px 0 0; font-size: 13px; color: var(--perdida); max-width: 52ch; }
+.leyenda span { display: inline-flex; align-items: center; gap: 6px; }
+.muestra { width: 11px; height: 11px; border-radius: 3px; display: inline-block; }
+.muestra.base { background: var(--serie); }
+.muestra.quitado { background: var(--perdida); }
+.muestra.quedo { background: var(--serie); opacity: .55; }
+
+.secuencia { width: 100%; font-size: 13px; border-collapse: collapse; }
+.secuencia th, .secuencia td { padding: 6px 9px; border-bottom: 1px solid var(--linea); white-space: nowrap; }
+.secuencia th { font-size: 11px; }
+.secuencia td.n { font-family: var(--cifra); font-variant-numeric: tabular-nums; }
+
+footer { margin-top: 44px; padding-top: 18px; border-top: 1px solid var(--linea); font-size: 13px; color: var(--tinta-3); }
+footer p { margin: 0 0 6px; max-width: 78ch; }
+code { font-family: var(--cifra); font-size: .92em; background: var(--hundido); padding: 1px 5px; border-radius: 4px; }
+
+@media (max-width: 560px) {
+  .campo select, .campo input { min-width: 0; width: 100%; }
+  .campo { flex: 1 1 100%; }
+  .tile.principal .valor { font-size: 34px; }
+}
+@media (prefers-reduced-motion: reduce) { * { transition: none !important; } }
+</style>
+</head>
+<body>
+<div class="envoltura">
+
+  <header class="cabecera">
+    <div class="crece">
+      <h1>Quién cambió las horas</h1>
+      <p>Cada turno al que supervisión le tocó las horas, con el valor que marcó el
+         colaborador, el que quedó y quién hizo el cambio. Sale de
+         <code>turnos_auditoria</code>, la bitácora que graba un trigger en la base.</p>
+      <div class="reservado" id="cobertura">Datos de personas · uso interno</div>
+    </div>
+    <button class="btn-tema" id="btn-tema" type="button">Cambiar tema</button>
+  </header>
+
+  <div class="filtros">
+    <div class="campo">
+      <label for="f-mes">Mes del turno</label>
+      <select id="f-mes"></select>
+    </div>
+    <div class="campo">
+      <label for="f-admin">Quién lo cambió</label>
+      <select id="f-admin"></select>
+    </div>
+    <div class="campo">
+      <label for="f-area">Área</label>
+      <select id="f-area"></select>
+    </div>
+    <div class="campo">
+      <label for="f-tipo">Tipo de cambio</label>
+      <select id="f-tipo"></select>
+    </div>
+    <div class="campo">
+      <label for="f-senal">Señal</label>
+      <select id="f-senal">
+        <option value="">Sin filtrar</option>
+        <option value="movida">Horario reescrito</option>
+        <option value="sin_motivo">Recorte sin motivo</option>
+        <option value="mes_cerrado">Corregido con el mes cerrado</option>
+        <option value="varios">Tocado más de una vez</option>
+      </select>
+    </div>
+    <div class="campo">
+      <label for="f-texto">Funcionario</label>
+      <input id="f-texto" type="search" placeholder="Escribe un nombre" autocomplete="off">
+    </div>
+    <button class="limpiar" id="limpiar" type="button">Quitar filtros</button>
+  </div>
+
+  <div class="resumen" id="resumen"></div>
+
+  <section>
+    <div class="titulo-seccion">
+      <h2>A quién se le quitaron horas</h2>
+      <span class="nota">Horas extra perdidas, de mayor a menor</span>
+    </div>
+    <div class="tarjeta">
+      <div class="barras" id="por-persona"></div>
+    </div>
+  </section>
+
+  <section>
+    <div class="par">
+      <div>
+        <div class="titulo-seccion"><h2>Quién lo hizo</h2><span class="nota">por horas extra eliminadas</span></div>
+        <div class="tarjeta"><div class="barras" id="por-admin"></div></div>
+      </div>
+      <div>
+        <div class="titulo-seccion"><h2>Qué clase de cambio fue</h2><span class="nota">por número de turnos</span></div>
+        <div class="tarjeta"><div class="barras" id="por-tipo"></div></div>
+      </div>
+    </div>
+  </section>
+
+  <section>
+    <div class="titulo-seccion">
+      <h2>Cada cambio, uno por uno</h2>
+      <span class="nota" id="conteo-tabla"></span>
+    </div>
+    <div class="marco-tabla">
+      <div class="desliza">
+        <table>
+          <thead>
+            <tr>
+              <th class="ordenable" data-orden="nombre">Funcionario <span class="flecha"></span></th>
+              <th>Área</th>
+              <th class="ordenable" data-orden="fecha">Turno <span class="flecha"></span></th>
+              <th class="ordenable" data-orden="h_antes">Marcó <span class="flecha"></span></th>
+              <th class="ordenable" data-orden="h_despues">Quedó <span class="flecha"></span></th>
+              <th class="ordenable" data-orden="extra_perdida">Extra perdida <span class="flecha"></span></th>
+              <th>Qué pasó</th>
+              <th class="ordenable" data-orden="admin">Quién <span class="flecha"></span></th>
+              <th class="ordenable" data-orden="cambiado">Cuándo <span class="flecha"></span></th>
+              <th>Señales</th>
+            </tr>
+          </thead>
+          <tbody id="cuerpo"></tbody>
+        </table>
+      </div>
+    </div>
+  </section>
+
+  <footer>
+    <p id="pie-cobertura"></p>
+    <p>La hora extra es lo único que se deja de pagar: la jornada base se paga igual,
+       de modo que un turno que baja de 12.23 h a 9.23 h no cuesta 3 h sino las 3 h
+       extra que tenía.</p>
+    <p>Cada turno se mide de punta a punta, del estado anterior a la primera
+       intervención al posterior a la última. Sumar los cambios fila a fila infla el
+       resultado cuando un supervisor se equivoca y se corrige enseguida. Un turno
+       borrado se compara contra lo que hoy existe para esa persona y esa fecha,
+       porque el turno rehecho tiene otro identificador.</p>
+    <p>Generado por <code>auditoria/tablero_cambios.py</code>. La regla que decide qué
+       costó horas está en <code>auditoria/consultas_cambios.py</code>, en la función
+       <code>clasificar</code>.</p>
+  </footer>
+</div>
+
+<script>
+const DATOS = /*DATOS*/;
+
+/* ---------- utilidades ---------- */
+const $ = (sel) => document.querySelector(sel);
+const num = (v) => (v === null || v === undefined ? null : Number(v));
+const h = (v) => (v === null || v === undefined ? "—" : Number(v).toFixed(2));
+const esc = (s) => String(s ?? "").replace(/[&<>"']/g, (c) =>
+  ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
+/* Plural simple: "1 turno" / "3 turnos". */
+const plural = (n, uno, varios) => `${n} ${n === 1 ? uno : varios}`;
+
+const MESES = { "01": "ene", "02": "feb", "03": "mar", "04": "abr", "05": "may", "06": "jun",
+                "07": "jul", "08": "ago", "09": "sep", "10": "oct", "11": "nov", "12": "dic" };
+const fechaCorta = (iso) => {
+  if (!iso) return "—";
+  const [a, m, d] = String(iso).slice(0, 10).split("-");
+  return `${d} ${MESES[m]}`;
+};
+const fechaMes = (mes) => {
+  const [a, m] = mes.split("-");
+  return `${MESES[m]} ${a}`;
+};
+
+/* Nombre legible de cada clasificación. La regla que las asigna vive en
+   consultas_cambios.clasificar; aquí solo se traducen para la pantalla. */
+const NOMBRE_TIPO = {
+  recorte:          "Le recortaron horas",
+  borrado_sin_turno:"Turno borrado, fecha sin registro",
+  borrado_con_menos:"Borrado y rehecho con menos",
+  borrado_rehecho:  "Borrado y rehecho igual o más",
+  borrado_sin_horas:"Borrado estando sin horas",
+  cierre_de_turno:  "Cierre de turno olvidado",
+  alza:             "Le subieron horas",
+  sin_cambio_horas: "Cambio sin mover horas",
+};
+const TIPOS_CON_PERDIDA = new Set(["recorte", "borrado_sin_turno", "borrado_con_menos"]);
+
+/* El panel guarda los timestamps corregidos sin segundos, de modo que casi
+   toda corrección mueve la marca unos segundos sin querer. Solo por encima de
+   este umbral el horario se movió de verdad. */
+const UMBRAL_MOVIDA = DATOS.umbral_marca_movida ?? 2;
+const movida = (min) => min !== null && min !== undefined && min > UMBRAL_MOVIDA;
+const enHoras = (min) => (min >= 60 ? `${(min / 60).toFixed(1)} h` : `${Math.round(min)} min`);
+
+/* ---------- estado ---------- */
+const estado = { mes: "", admin: "", area: "", tipo: "", senal: "", texto: "",
+                 orden: "extra_perdida", desc: true, abierto: null };
+
+/* ---------- arranque ---------- */
+function poblarSelector(sel, valores, etiquetaTodos, formato) {
+  const el = $(sel);
+  el.innerHTML = `<option value="">${etiquetaTodos}</option>` +
+    valores.map((v) => `<option value="${esc(v)}">${esc(formato ? formato(v) : v)}</option>`).join("");
+}
+
+function iniciar() {
+  const T = DATOS.turnos;
+  poblarSelector("#f-mes", [...new Set(T.map((t) => t.mes))].filter(Boolean).sort(),
+                 "Todos los meses", fechaMes);
+  poblarSelector("#f-admin", [...new Set(T.map((t) => t.admin))].sort(), "Todos");
+  poblarSelector("#f-area", [...new Set(T.map((t) => t.area))].filter(Boolean).sort(), "Todas");
+  poblarSelector("#f-tipo", Object.keys(NOMBRE_TIPO).filter((k) => T.some((t) => t.tipo === k)),
+                 "Todos", (k) => NOMBRE_TIPO[k]);
+
+  const c = DATOS.cobertura;
+  $("#cobertura").textContent =
+    `Datos de personas · uso interno · bitácora del ${fechaCorta(c.primer_registro)} al ${fechaCorta(c.ultimo_registro)}`;
+  $("#pie-cobertura").textContent =
+    `La bitácora registra desde el ${c.primer_registro} y acumula ${c.filas} cambios. ` +
+    `Un turno corregido antes de esa fecha no aparece aquí, porque su valor anterior no se guardó. ` +
+    `Datos leídos el ${DATOS.generado.replace("T", " a las ")}.`;
+
+  $("#f-mes").addEventListener("change", (e) => { estado.mes = e.target.value; pintar(); });
+  $("#f-admin").addEventListener("change", (e) => { estado.admin = e.target.value; pintar(); });
+  $("#f-area").addEventListener("change", (e) => { estado.area = e.target.value; pintar(); });
+  $("#f-tipo").addEventListener("change", (e) => { estado.tipo = e.target.value; pintar(); });
+  $("#f-senal").addEventListener("change", (e) => { estado.senal = e.target.value; pintar(); });
+  $("#f-texto").addEventListener("input", (e) => { estado.texto = e.target.value.trim().toLowerCase(); pintar(); });
+  $("#limpiar").addEventListener("click", () => {
+    Object.assign(estado, { mes: "", admin: "", area: "", tipo: "", senal: "", texto: "", abierto: null });
+    ["#f-mes", "#f-admin", "#f-area", "#f-tipo", "#f-senal", "#f-texto"].forEach((s) => ($(s).value = ""));
+    pintar();
+  });
+
+  document.querySelectorAll("th.ordenable").forEach((th) => {
+    th.addEventListener("click", () => {
+      const col = th.dataset.orden;
+      if (estado.orden === col) estado.desc = !estado.desc;
+      else { estado.orden = col; estado.desc = true; }
+      pintar();
+    });
+  });
+
+  $("#btn-tema").addEventListener("click", () => {
+    const raiz = document.documentElement;
+    const oscuroAhora = raiz.dataset.theme === "dark" ||
+      (raiz.dataset.theme !== "light" && matchMedia("(prefers-color-scheme: dark)").matches);
+    raiz.dataset.theme = oscuroAhora ? "light" : "dark";
+  });
+
+  pintar();
+}
+
+/* ---------- filtrado ---------- */
+const SENALES = {
+  movida:      (t) => movida(t.entrada_movida),
+  sin_motivo:  (t) => t.tipo === "recorte" && !t.con_motivo,
+  mes_cerrado: (t) => t.mes_cerrado,
+  varios:      (t) => t.intervenciones > 1,
+};
+
+function filtrados() {
+  const senal = SENALES[estado.senal];
+  return DATOS.turnos.filter((t) =>
+    (!estado.mes || t.mes === estado.mes) &&
+    (!estado.admin || t.admin === estado.admin) &&
+    (!estado.area || t.area === estado.area) &&
+    (!estado.tipo || t.tipo === estado.tipo) &&
+    (!senal || senal(t)) &&
+    (!estado.texto || t.nombre.toLowerCase().includes(estado.texto))
+  );
+}
+
+/* Turnos con hora extra que tuvo cada persona en los meses a la vista. Es el
+   denominador que distingue a quien trabajó muchos turnos de quien tuvo muchos
+   turnos tocados. */
+function contextoPersonas() {
+  const mapa = new Map();
+  DATOS.contexto.forEach((c) => {
+    if (estado.mes && c.mes !== estado.mes) return;
+    if (estado.area && c.area !== estado.area) return;
+    const previo = mapa.get(c.nombre) || { turnos: 0, con_extra: 0, extra: 0 };
+    previo.turnos += c.turnos;
+    previo.con_extra += c.turnos_con_extra;
+    previo.extra += Number(c.extra || 0);
+    mapa.set(c.nombre, previo);
+  });
+  return mapa;
+}
+
+/* ---------- pintado ---------- */
+function pintar() {
+  const vista = filtrados();
+  pintarResumen(vista);
+  pintarPersonas(vista);
+  pintarAdmins(vista);
+  pintarTipos(vista);
+  pintarTabla(vista);
+}
+
+function pintarResumen(vista) {
+  const perdida = vista.reduce((s, t) => s + t.extra_perdida, 0);
+  const afectadas = new Set(vista.filter((t) => t.extra_perdida > 0).map((t) => t.nombre));
+  const tocadas = new Set(vista.map((t) => t.nombre));
+  const recortes = vista.filter((t) => t.tipo === "recorte");
+  const sinMotivo = recortes.filter((t) => !t.con_motivo).length;
+  const retro = vista.filter((t) => t.mes_cerrado && t.extra_perdida > 0).length;
+  const movidos = vista.filter((t) => movida(t.entrada_movida));
+  const reescritos = movidos.length;
+  const conPerdidaMovida = movidos.filter((t) => t.extra_perdida > 0).length;
+  const conPerdida = vista.filter((t) => t.extra_perdida > 0).length;
+
+  const ctx = contextoPersonas();
+  let extraBase = 0;
+  afectadas.forEach((n) => { extraBase += (ctx.get(n)?.extra || 0); });
+  const proporcion = extraBase + perdida > 0
+    ? ` · el ${((perdida / (extraBase + perdida)) * 100).toFixed(1)} % de la hora extra que habían marcado` : "";
+
+  $("#resumen").innerHTML = `
+    <div class="tile principal">
+      <div class="etiqueta">Hora extra eliminada</div>
+      <div class="valor">${perdida.toFixed(2)} h</div>
+      <div class="pie">en ${plural(conPerdida, "turno", "turnos")}${proporcion}</div>
+    </div>
+    <div class="tile">
+      <div class="etiqueta">Turnos tocados</div>
+      <div class="valor">${vista.length}</div>
+      <div class="pie">de ${plural(tocadas.size, "funcionario", "funcionarios")}</div>
+    </div>
+    <div class="tile">
+      <div class="etiqueta">Perdieron horas</div>
+      <div class="valor">${afectadas.size}</div>
+      <div class="pie">${afectadas.size === 1 ? "funcionario" : "funcionarios"} con extra eliminada</div>
+    </div>
+    <div class="tile">
+      <div class="etiqueta">Recortes sin motivo</div>
+      <div class="valor">${sinMotivo}</div>
+      <div class="pie">de ${plural(recortes.length, "recorte", "recortes")}</div>
+    </div>
+    <div class="tile">
+      <div class="etiqueta">Horario reescrito</div>
+      <div class="valor">${reescritos}</div>
+      <div class="pie">${conPerdidaMovida} de ellos perdieron horas</div>
+    </div>
+    <div class="tile">
+      <div class="etiqueta">Con el mes cerrado</div>
+      <div class="valor">${retro}</div>
+      <div class="pie">turnos ya archivados al corregirse</div>
+    </div>`;
+}
+
+/* `valor` fija el largo de la barra y `monto` es lo que se lee a la derecha.
+   Se separan porque el panel de clases de cambio mide turnos, no horas: la
+   mitad de esas clases vale 0 h y una barra de largo cero no diría nada. */
+function barra(quien, monto, valor, maximo, pie) {
+  const ancho = maximo > 0 ? Math.max(1.2, (valor / maximo) * 100) : 0;
+  return `<div class="barra">
+      <div class="fila-1">
+        <span class="quien">${esc(quien)}</span>
+        <span class="monto">${esc(monto)}</span>
+      </div>
+      <div class="pista"><div class="relleno" style="width:${ancho.toFixed(1)}%"></div></div>
+      <div class="fila-2">${pie}</div>
+    </div>`;
+}
+
+function pintarPersonas(vista) {
+  const ctx = contextoPersonas();
+  const mapa = new Map();
+  vista.forEach((t) => {
+    if (t.extra_perdida <= 0) return;
+    const p = mapa.get(t.nombre) || { horas: 0, turnos: 0, admins: new Set(), area: t.area };
+    p.horas += t.extra_perdida;
+    p.turnos += 1;
+    p.admins.add(t.admin);
+    mapa.set(t.nombre, p);
+  });
+  const filas = [...mapa.entries()].sort((a, b) => b[1].horas - a[1].horas);
+  const maximo = filas.length ? filas[0][1].horas : 0;
+
+  $("#por-persona").innerHTML = filas.length === 0
+    ? `<p class="vacio">Ningún funcionario perdió horas extra con estos filtros.</p>`
+    : filas.map(([nombre, p]) => {
+        const base = ctx.get(nombre);
+        const deCuantos = base && base.con_extra
+          ? (base.con_extra === 1
+              ? `su único turno con hora extra`
+              : `${p.turnos} de sus ${base.con_extra} turnos con hora extra`)
+          : plural(p.turnos, "turno", "turnos");
+        const pie = `<span>${esc(deCuantos)}</span>` +
+                    (p.area ? `<span>· ${esc(p.area)}</span>` : "") +
+                    `<span>· ${esc([...p.admins].join(", "))}</span>`;
+        return barra(nombre, `${p.horas.toFixed(2)} h`, p.horas, maximo, pie);
+      }).join("");
+}
+
+function pintarAdmins(vista) {
+  const mapa = new Map();
+  vista.forEach((t) => {
+    const a = mapa.get(t.admin) || { horas: 0, turnos: 0, tocados: 0, personas: new Set(), sinMotivo: 0, retro: 0 };
+    a.tocados += 1;
+    a.personas.add(t.nombre);
+    if (t.extra_perdida > 0) { a.horas += t.extra_perdida; a.turnos += 1; }
+    if (t.tipo === "recorte" && !t.con_motivo) a.sinMotivo += 1;
+    if (t.mes_cerrado && t.extra_perdida > 0) a.retro += 1;
+    mapa.set(t.admin, a);
+  });
+  const filas = [...mapa.entries()].sort((a, b) => b[1].horas - a[1].horas || b[1].tocados - a[1].tocados);
+  const maximo = filas.length ? Math.max(...filas.map((f) => f[1].horas)) : 0;
+
+  $("#por-admin").innerHTML = filas.length === 0
+    ? `<p class="vacio">Sin cambios con estos filtros.</p>`
+    : filas.map(([quien, a]) => {
+        const pie = `<span>${plural(a.turnos, "turno", "turnos")} con pérdida, de ${plural(a.tocados, "tocado", "tocados")}</span>` +
+          `<span>· ${plural(a.personas.size, "persona", "personas")}</span>` +
+          (a.sinMotivo ? `<span class="chip alerta">${a.sinMotivo} sin motivo</span>` : "") +
+          (a.retro ? `<span class="chip">${a.retro} con el mes cerrado</span>` : "");
+        return barra(quien, `${a.horas.toFixed(2)} h`, a.horas, maximo, pie);
+      }).join("");
+}
+
+function pintarTipos(vista) {
+  const mapa = new Map();
+  vista.forEach((t) => {
+    const x = mapa.get(t.tipo) || { horas: 0, turnos: 0 };
+    x.horas += t.extra_perdida;
+    x.turnos += 1;
+    mapa.set(t.tipo, x);
+  });
+  const filas = [...mapa.entries()].sort((a, b) => b[1].horas - a[1].horas || b[1].turnos - a[1].turnos);
+  const maximo = filas.length ? Math.max(...filas.map((f) => f[1].turnos)) : 0;
+
+  $("#por-tipo").innerHTML = filas.length === 0
+    ? `<p class="vacio">Sin cambios con estos filtros.</p>`
+    : filas.map(([tipo, x]) => {
+        const pie = TIPOS_CON_PERDIDA.has(tipo)
+          ? `<span class="chip perdida">${x.horas.toFixed(2)} h extra perdidas</span>`
+          : `<span>no resta horas pagables</span>`;
+        return barra(NOMBRE_TIPO[tipo] || tipo, plural(x.turnos, "turno", "turnos"),
+                     x.turnos, maximo, pie);
+      }).join("");
+}
+
+function pintarTabla(vista) {
+  const col = estado.orden;
+  const ordenados = [...vista].sort((a, b) => {
+    let x = a[col], y = b[col];
+    if (col === "extra_perdida" || col === "h_antes" || col === "h_despues") {
+      x = num(x) ?? -1; y = num(y) ?? -1;
+      return estado.desc ? y - x : x - y;
+    }
+    x = String(x ?? ""); y = String(y ?? "");
+    return estado.desc ? y.localeCompare(x, "es") : x.localeCompare(y, "es");
+  });
+
+  document.querySelectorAll("th.ordenable").forEach((th) => {
+    th.querySelector(".flecha").textContent =
+      th.dataset.orden === col ? (estado.desc ? "▼" : "▲") : "";
+  });
+
+  $("#conteo-tabla").textContent =
+    `${ordenados.length} turno${ordenados.length === 1 ? "" : "s"}; toca una fila para ver el historial completo`;
+
+  $("#cuerpo").innerHTML = ordenados.map((t) => {
+    const perdida = t.extra_perdida > 0
+      ? `<span class="delta-baja">−${t.extra_perdida.toFixed(2)}</span>`
+      : (t.delta_extra > 0 ? `<span class="delta-sube">+${t.delta_extra.toFixed(2)}</span>`
+                           : `<span class="sin-dato">0.00</span>`);
+    const quedo = t.tipo.startsWith("borrado")
+      ? (t.turnos_hoy > 0 ? `${h(t.horas_hoy)} <span class="sin-dato">rehecho</span>`
+                          : `<span class="delta-baja">borrado</span>`)
+      : h(t.h_despues);
+    const senales = [
+      movida(t.entrada_movida) ? `<span class="chip perdida">horario movido</span>` : "",
+      t.tipo === "recorte" && !t.con_motivo ? `<span class="chip alerta">sin motivo</span>` : "",
+      t.mes_cerrado ? `<span class="chip">mes cerrado</span>` : "",
+      t.intervenciones > 1 ? `<span class="chip">${t.intervenciones} cambios</span>` : "",
+    ].filter(Boolean).join(" ");
+
+    const detalle = estado.abierto === t.id ? filaDetalle(t) : "";
+    return `<tr class="cambio" data-id="${t.id}" tabindex="0">
+        <td><span class="nombre">${esc(t.nombre)}</span></td>
+        <td>${esc(t.area || "—")}</td>
+        <td class="num">${fechaCorta(t.fecha)}</td>
+        <td class="num">${h(t.h_antes)}</td>
+        <td class="num">${quedo}</td>
+        <td class="num">${perdida}</td>
+        <td>${esc(NOMBRE_TIPO[t.tipo] || t.tipo)}</td>
+        <td>${esc(t.admin)}</td>
+        <td class="num">${fechaCorta(t.cambiado)}</td>
+        <td>${senales || "—"}</td>
+      </tr>${detalle}`;
+  }).join("");
+
+  document.querySelectorAll("tr.cambio").forEach((tr) => {
+    const alternar = () => {
+      const id = Number(tr.dataset.id);
+      estado.abierto = estado.abierto === id ? null : id;
+      pintarTabla(vista);
+    };
+    tr.addEventListener("click", alternar);
+    tr.addEventListener("keydown", (e) => {
+      if (e.key === "Enter" || e.key === " ") { e.preventDefault(); alternar(); }
+    });
+  });
+}
+
+/* ---------- detalle de un turno ---------- */
+function minutos(ts, diaRef) {
+  const m = /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2})/.exec(String(ts || ""));
+  if (!m) return null;
+  const [, a, me, d, hh, mm] = m.map(Number);
+  const r = String(diaRef).slice(0, 10).split("-").map(Number);
+  const dias = Math.round((Date.UTC(a, me - 1, d) - Date.UTC(r[0], r[1] - 1, r[2])) / 86400000);
+  return dias * 1440 + hh * 60 + mm;
+}
+/* Un turno de noche cruza la medianoche, de modo que la hora sola es ambigua:
+   las 00:03 del día siguiente se escriben 00:03 +1. */
+const reloj = (min) => {
+  if (min === null) return "—";
+  const dias = Math.floor(min / 1440);
+  const m = ((min % 1440) + 1440) % 1440;
+  const hhmm = `${String(Math.floor(m / 60)).padStart(2, "0")}:${String(m % 60).padStart(2, "0")}`;
+  return dias === 0 ? hhmm : `${hhmm} ${dias > 0 ? "+" : "−"}${Math.abs(dias)}`;
+};
+
+/* Dos carriles sobre el mismo eje horario: lo que marcó el colaborador y lo que
+   quedó. El tramo que desapareció va en rojo y además rotulado, porque el color
+   solo no puede cargar el dato. */
+function lineaTiempo(t) {
+  const dia = t.fecha;
+  const e1 = minutos(t.entrada_antes, dia), s1 = minutos(t.salida_antes, dia);
+  const e2 = minutos(t.entrada_despues, dia), s2 = minutos(t.salida_despues, dia);
+  const puntos = [e1, s1, e2, s2].filter((v) => v !== null);
+  if (puntos.length < 2) return `<p class="vacio">El turno no tiene entrada y salida comparables.</p>`;
+
+  const ini = Math.floor(Math.min(...puntos) / 60) * 60 - 30;
+  const fin = Math.ceil(Math.max(...puntos) / 60) * 60 + 30;
+  const span = Math.max(60, fin - ini);
+  const pos = (v) => ((v - ini) / span) * 100;
+
+  const carril = (rotulo, desde, hasta, clase, extra = "") => {
+    if (desde === null || hasta === null) {
+      return `<div class="carril"><span class="rotulo">${rotulo}</span>
+        <span class="sin-dato" style="font-size:13px">sin salida registrada</span></div>`;
+    }
+    return `<div class="carril"><span class="rotulo">${rotulo}</span>
+      <div class="via">
+        <div class="tramo ${clase}" style="left:${pos(desde).toFixed(2)}%;width:${(pos(hasta) - pos(desde)).toFixed(2)}%"></div>
+        ${extra}
+      </div></div>`;
+  };
+
+  // El tramo recortado solo se puede dibujar cuando la entrada se quedó donde
+  // estaba y lo único que se movió fue el final del turno. Si el supervisor
+  // movió también la entrada, el turno no se acortó por un extremo: se
+  // reescribió entero, y pintar un tramo rojo contaría algo que no pasó.
+  const entradaMovida = movida(t.entrada_movida);
+  let quitado = "";
+  if (!entradaMovida && s1 !== null && s2 !== null && s2 < s1) {
+    quitado = `<div class="tramo quitado" style="left:${pos(s2).toFixed(2)}%;width:${(pos(s1) - pos(s2)).toFixed(2)}%"></div>`;
+  }
+
+  const borrado = t.tipo.startsWith("borrado");
+  const marcas = [];
+  for (let m = Math.ceil(ini / 120) * 120; m <= fin; m += 120) marcas.push(reloj(m));
+
+  return `<div class="reloj">
+      ${carril("Marcó", e1, s1, "base")}
+      ${borrado
+        ? `<div class="carril"><span class="rotulo">Quedó</span>
+             <span class="sin-dato" style="font-size:13px">turno borrado${t.turnos_hoy > 0 ? `, rehecho con ${h(t.horas_hoy)} h` : ", sin registro en esa fecha"}</span></div>`
+        : carril("Quedó", e2, s2, "puesto", quitado)}
+      <div class="ejes"><span></span><div class="marcas">${marcas.map((x) => `<span>${x}</span>`).join("")}</div></div>
+      <div class="leyenda">
+        <span><i class="muestra base"></i> lo que marcó</span>
+        <span><i class="muestra quedo"></i> lo que quedó</span>
+        ${quitado ? `<span><i class="muestra quitado"></i> tramo eliminado, ${h(num(t.h_antes) - num(t.h_despues))} h</span>` : ""}
+        <span>entrada ${reloj(e1)}${entradaMovida ? ` → ${reloj(e2)}` : ""}</span>
+        <span>salida ${reloj(s1)}${s2 !== null && s2 !== s1 ? ` → ${reloj(s2)}` : ""}</span>
+      </div>
+      ${entradaMovida ? `<p class="aviso-movida">El horario se reescribió completo: la entrada se movió
+        ${enHoras(t.entrada_movida)}, no solo se acortó el final del turno.</p>` : ""}
+    </div>`;
+}
+
+function filaDetalle(t) {
+  const pasos = DATOS.secuencia[String(t.id)] || [];
+  const motivo = t.motivo
+    ? `<div class="motivo">${esc(t.motivo)}</div>`
+    : `<div class="motivo ausente">No se escribió motivo al corregir este turno.</div>`;
+
+  const historial = pasos.map((p) => `
+      <tr>
+        <td class="n">${esc(String(p.momento).slice(0, 16).replace("T", " "))}</td>
+        <td>${esc(p.usuario)}</td>
+        <td>${esc(p.origen === "colaborador" ? "marcación propia"
+                 : p.origen === "sistema" ? "barrido automático"
+                 : p.origen === "fuera_de_la_app" ? "editado en la base" : "panel de admin")}</td>
+        <td>${p.accion === "DELETE" ? "borró el turno" : "corrigió"}</td>
+        <td class="n">${h(p.h_antes)} → ${p.accion === "DELETE" ? "—" : h(p.h_despues)}</td>
+      </tr>`).join("");
+
+  return `<tr class="detalle"><td colspan="10">
+      <div class="detalle-rejilla">
+        <div>
+          <h3>El turno, hora por hora</h3>
+          ${lineaTiempo(t)}
+        </div>
+        <div>
+          <h3>Motivo que escribió ${esc(t.admin)}</h3>
+          ${motivo}
+          <h3 style="margin-top:18px">Todo lo que le pasó a este turno</h3>
+          <div class="desliza">
+            <table class="secuencia">
+              <thead><tr><th>Cuándo</th><th>Quién</th><th>Desde dónde</th><th>Qué hizo</th><th>Horas</th></tr></thead>
+              <tbody>${historial || `<tr><td colspan="5" class="sin-dato">Sin historial.</td></tr>`}</tbody>
+            </table>
+          </div>
+        </div>
+      </div>
+    </td></tr>`;
+}
+
+iniciar();
+</script>
+</body>
+</html>

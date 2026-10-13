@@ -10,13 +10,28 @@ devolvía la lectura del Sheet, para no romper filtros ni estilos.
 El "archivado" ya no hace falta por rendimiento (Postgres aguanta todo el
 histórico); se conserva como flag para que el panel siga separando mes activo
 de histórico.
+
+Desde las migraciones de migracion/versiones/
+---------------------------------------------
+- Un turno no se borra: se anula, y los anulados no aparecen en las lecturas.
+- Corregir el horario de un turno cerrado o anularlo es un ajuste
+  (solicitar_correccion, solicitar_anulacion). Los grandes esperan la
+  aprobación de otro administrador.
+- La base calcula las horas y valida cada turno. Si rechaza algo por una regla
+  de negocio, aquí se convierte en ReglaDeNegocio con un mensaje para el
+  usuario; quien llama decide cómo mostrarlo.
+- Toda escritura se sella con autor, origen y, si es de un administrador,
+  motivo. La bitácora y las marcaciones los toman de ahí.
 """
 
+import re
+from contextlib import contextmanager
 from datetime import date, datetime
 
 import pandas as pd
 import streamlit as st
 from sqlalchemy import text
+from sqlalchemy.exc import DBAPIError
 
 from core.config import COLUMNAS, TS_FMT
 from core.db import get_engine, reintento_de_lectura
@@ -50,6 +65,33 @@ _COLS_FECHA = {"Fecha de Turno"}
 ORIGEN_ADMIN = "admin"
 ORIGEN_COLABORADOR = "colaborador"
 ORIGEN_SISTEMA = "sistema"
+
+
+# ---------------------------------------------------------------------------
+# Errores de regla de negocio
+# ---------------------------------------------------------------------------
+class ReglaDeNegocio(Exception):
+    """La base rechazó la operación por una regla de negocio.
+
+    El mensaje está escrito para el usuario final y se puede mostrar tal cual.
+    Las funciones de la base lo marcan con el prefijo 'TURNERO:' (ver
+    migracion/versiones/V001__reglas_de_negocio.sql, fn_solo_insercion)."""
+
+
+_PATRON_REGLA = re.compile(r"TURNERO:\s*(.+?)\s*(?:\n|$)")
+
+
+@contextmanager
+def _traducir_errores():
+    """Convierte el rechazo de una regla de la base en ReglaDeNegocio. Los
+    demás errores siguen su curso: no son algo que el usuario pueda arreglar."""
+    try:
+        yield
+    except DBAPIError as e:
+        m = _PATRON_REGLA.search(str(getattr(e, "orig", e)))
+        if m:
+            raise ReglaDeNegocio(m.group(1)) from None
+        raise
 
 
 # ---------------------------------------------------------------------------
@@ -105,11 +147,20 @@ def _valor_sql(col_app: str, val):
 def _fila_a_params(fila: dict) -> dict:
     """Dict de la app (claves en español) -> params SQL para INSERT."""
     params = {sql_col: _valor_sql(app_col, fila.get(app_col, "")) for app_col, sql_col in _COL_SQL.items()}
-    # fecha_turno es NOT NULL. El Estado vacío sí se preserva: hay filas legacy
-    # con "Abierto" en Observaciones que buscar_turno_abierto_idx maneja aparte.
+    # fecha_turno es NOT NULL. La base la recalcula desde la entrada de todos
+    # modos (V004); esto solo evita mandar un NULL.
     if params["fecha_turno"] is None and params["ts_entrada"] is not None:
         params["fecha_turno"] = params["ts_entrada"].date()
     return params
+
+
+def _a_local_naive(v):
+    """Las columnas con zona (V102) llegan como datetime con tzinfo, en la zona
+    de la sesión, que core/db.py fija en Ecuador. La aplicación trabaja sin
+    zona: se descarta el tzinfo sin mover la hora."""
+    if isinstance(v, datetime) and v.tzinfo is not None:
+        return v.replace(tzinfo=None)
+    return v
 
 
 def _df_desde_filas(rows) -> pd.DataFrame:
@@ -121,7 +172,7 @@ def _df_desde_filas(rows) -> pd.DataFrame:
             if v is None:
                 datos[app_col].append("")
             elif app_col in _COLS_TS:
-                datos[app_col].append(v.strftime(TS_FMT))
+                datos[app_col].append(_a_local_naive(v).strftime(TS_FMT))
             elif app_col in _COLS_FECHA:
                 datos[app_col].append(v.strftime("%Y-%m-%d"))
             elif app_col in _COLS_NUM:
@@ -135,7 +186,7 @@ def _df_desde_filas(rows) -> pd.DataFrame:
 _SELECT_TURNOS = (
     "SELECT nombre, area, fecha_turno, ts_entrada, ts_salida, "
     "horas_trabajadas, horas_efectivas, horas_extra, estado, evento, observaciones "
-    "FROM turnos WHERE archivado = :arch ORDER BY ts_entrada, id"
+    "FROM turnos WHERE archivado = :arch AND NOT anulado ORDER BY ts_entrada, id"
 )
 
 
@@ -148,6 +199,11 @@ def _leer_turnos(archivado: bool) -> pd.DataFrame:
 
 def _df_vacio() -> pd.DataFrame:
     return pd.DataFrame({c: pd.Series(dtype=object) for c in COLUMNAS})
+
+
+def _limpiar_caches() -> None:
+    leer_registros.clear()
+    leer_historico.clear()
 
 
 # ---------------------------------------------------------------------------
@@ -166,7 +222,7 @@ def _espejo(func, *args) -> None:
 # ---------------------------------------------------------------------------
 @st.cache_data(ttl=300)
 def leer_registros() -> pd.DataFrame:
-    """Turnos activos (no archivados), en orden cronológico de entrada."""
+    """Turnos activos (no archivados, no anulados), en orden cronológico."""
     try:
         return _leer_turnos(archivado=False)
     except Exception as e:
@@ -176,7 +232,7 @@ def leer_registros() -> pd.DataFrame:
 
 @st.cache_data(ttl=300)
 def leer_historico() -> pd.DataFrame:
-    """Turnos archivados (meses cerrados)."""
+    """Turnos archivados (meses cerrados), sin los anulados."""
     try:
         return _leer_turnos(archivado=True)
     except Exception as e:
@@ -210,46 +266,55 @@ def leer_horas_esperadas() -> pd.DataFrame:
 # ---------------------------------------------------------------------------
 # Escrituras
 # ---------------------------------------------------------------------------
+# El WHERE NOT anulado apunta al índice único parcial de V002, que permite
+# rehacer con la misma entrada un turno anulado. Mientras exista el índice viejo
+# (hasta V101), Postgres usa los dos como árbitros, y el resultado es el mismo.
 _INSERT_TURNO = text(
     "INSERT INTO turnos (nombre, area, fecha_turno, ts_entrada, ts_salida, "
     "horas_trabajadas, horas_efectivas, horas_extra, estado, evento, observaciones) "
     "VALUES (:nombre, :area, :fecha_turno, :ts_entrada, :ts_salida, "
     ":horas_trabajadas, :horas_efectivas, :horas_extra, :estado, :evento, :observaciones) "
-    "ON CONFLICT ((lower(nombre)), ts_entrada) DO NOTHING"
+    "ON CONFLICT ((lower(nombre)), ts_entrada) WHERE NOT anulado DO NOTHING"
 )
 
 
-def append_registro(fila: dict) -> None:
-    """Inserta un turno. El índice único (nombre, ts_entrada) hace que un
-    doble-click que intente duplicar el mismo turno simplemente no inserte."""
+def _sellar_autor(conn, autor: str, origen: str, motivo: str = "") -> None:
+    """Deja autor, origen y motivo en la sesión, para que los triggers los
+    graben en la bitácora y en las marcaciones.
+
+    El tercer argumento de set_config en `true` lo hace local a la transacción,
+    de modo que no se filtra a la siguiente petición que reutilice la misma
+    conexión del pool. Si no se sella, el trigger registra el cambio con
+    origen = 'fuera_de_la_app', que es la señal de una edición hecha por fuera
+    de la aplicación.
+
+    El motivo es obligatorio para un administrador desde V101: la base rechaza
+    su escritura si falta.
+    """
+    conn.execute(
+        text("select set_config('app.usuario', :u, true), "
+             "       set_config('app.origen',  :o, true), "
+             "       set_config('app.motivo',  :m, true)"),
+        {"u": _normalizar_texto(autor)[:120], "o": origen, "m": _normalizar_texto(motivo)[:1000]},
+    )
+
+
+def append_registro(fila: dict, *, autor: str, origen: str, motivo: str = "") -> bool:
+    """Inserta un turno. True si se insertó.
+
+    El índice único (nombre, entrada) hace que un doble clic que intente
+    duplicar el mismo turno simplemente no inserte, y eso devuelve False.
+    Una regla de la base que rechace el turno levanta ReglaDeNegocio."""
     params = _fila_a_params(fila)
     if params["ts_entrada"] is None:
-        st.error("No se pudo interpretar el Timestamp Entrada del registro; no se guardó.")
-        return
-    with get_engine().begin() as conn:
-        conn.execute(_INSERT_TURNO, params)
-    leer_registros.clear()
-    _espejo(sheets_backup.espejo_append, fila)
-
-
-def append_registros_batch(filas: list) -> int:
-    """Inserta varios turnos en una sola transacción. Devuelve cuántos se
-    intentaron insertar (los duplicados exactos se omiten silenciosamente)."""
-    if not filas:
-        return 0
-    lote = []
-    for fila in filas:
-        params = _fila_a_params(fila)
-        if params["ts_entrada"] is None:
-            continue
-        lote.append(params)
-    if not lote:
-        return 0
-    with get_engine().begin() as conn:
-        conn.execute(_INSERT_TURNO, lote)
-    leer_registros.clear()
-    _espejo(sheets_backup.espejo_append_batch, filas)
-    return len(lote)
+        raise ReglaDeNegocio("No se pudo interpretar la hora de entrada; no se guardó el turno.")
+    with _traducir_errores(), get_engine().begin() as conn:
+        _sellar_autor(conn, autor, origen, motivo)
+        res = conn.execute(_INSERT_TURNO, params)
+    _limpiar_caches()
+    if res.rowcount:
+        _espejo(sheets_backup.espejo_append, fila)
+    return bool(res.rowcount)
 
 
 def _armar_update(cambios: dict):
@@ -274,10 +339,8 @@ def _con_fecha_turno_derivada(cambios: dict) -> dict:
     """Regla de negocio: la Fecha de Turno es siempre la fecha de la entrada,
     también cuando el turno cruza la medianoche.
 
-    Si una edición mueve el Timestamp Entrada sin fijar la Fecha de Turno, se
-    recalcula aquí, para que la fecha por la que agrupan los gráficos no quede
-    desfasada. Devuelve un dict nuevo, con la fecha como texto '%Y-%m-%d' para
-    que el espejo en Sheets reciba el formato que ya usa esa columna."""
+    Desde V004 la base la impone por su cuenta. Se conserva aquí para que el
+    espejo en Sheets reciba la misma fecha que la base."""
     if "Timestamp Entrada" not in cambios or "Fecha de Turno" in cambios:
         return cambios
     ts_ent = _a_ts(cambios["Timestamp Entrada"])
@@ -288,29 +351,17 @@ def _con_fecha_turno_derivada(cambios: dict) -> dict:
     return nuevo
 
 
-def _sellar_autor(conn, autor: str, origen: str) -> None:
-    """Deja el autor del cambio en la sesión, para que el trigger de auditoría
-    lo grabe en turnos_auditoria (ver migracion/auditoria_schema.sql).
-
-    El tercer argumento de set_config en `true` lo hace local a la transacción,
-    de modo que no se filtra a la siguiente petición que reutilice la misma
-    conexión del pool. Si no se sella, el trigger registra el cambio con
-    origen = 'fuera_de_la_app', que es la señal de una edición hecha por fuera
-    de la aplicación.
-    """
-    conn.execute(
-        text("select set_config('app.usuario', :u, true), "
-             "       set_config('app.origen',  :o, true)"),
-        {"u": _normalizar_texto(autor)[:120], "o": origen},
-    )
+_WHERE_POR_ENTRADA = "WHERE lower(nombre) = :w_nombre AND ts_entrada = :w_ts AND NOT anulado"
 
 
 def actualizar_por_entrada(nombre: str, ts_entrada_str: str, cambios: dict,
-                           *, autor: str, origen: str) -> bool:
+                           *, autor: str, origen: str, motivo: str = "") -> bool:
     """Actualiza solo las columnas de `cambios` en la fila (Nombre, Timestamp
-    Entrada). False si la fila no existe. `cambios` puede traer un Timestamp
-    Entrada nuevo: la fila se localiza por el original y la Fecha de Turno se
-    recalcula sola (ver _con_fecha_turno_derivada).
+    Entrada). False si la fila no existe.
+
+    Sirve para la marcación, el envío a revisión y el cierre de un turno en
+    revisión. Para corregir el horario de un turno ya cerrado se usa
+    solicitar_correccion: desde V101 la base rechaza hacerlo por aquí.
 
     `autor` y `origen` son obligatorios y por nombre: van a la bitácora de
     auditoría, y se exigen para que un sitio de llamada nuevo falle en vez de
@@ -325,23 +376,18 @@ def actualizar_por_entrada(nombre: str, ts_entrada_str: str, cambios: dict,
         return False
     params["w_nombre"] = _normalizar_cmp(nombre)
     params["w_ts"] = ts
-    with get_engine().begin() as conn:
-        _sellar_autor(conn, autor, origen)
-        res = conn.execute(
-            text(f"UPDATE turnos SET {set_sql} "
-                 "WHERE lower(nombre) = :w_nombre AND ts_entrada = :w_ts"),
-            params,
-        )
+    with _traducir_errores(), get_engine().begin() as conn:
+        _sellar_autor(conn, autor, origen, motivo)
+        res = conn.execute(text(f"UPDATE turnos SET {set_sql} {_WHERE_POR_ENTRADA}"), params)
     if res.rowcount == 0:
         return False
-    leer_registros.clear()
-    leer_historico.clear()
+    _limpiar_caches()
     _espejo(sheets_backup.espejo_actualizar, nombre, ts_entrada_str, cambios)
     return True
 
 
 def actualizar_varios_por_entrada(cambios_por_entrada: list,
-                                  *, autor: str, origen: str) -> int:
+                                  *, autor: str, origen: str, motivo: str = "") -> int:
     """Aplica varios cambios en una sola transacción. Cada elemento es
     (nombre, ts_entrada_str, cambios). Devuelve cuántas filas se actualizaron.
 
@@ -355,9 +401,9 @@ def actualizar_varios_por_entrada(cambios_por_entrada: list,
         for nombre, ts_str, cambios in cambios_por_entrada
     ]
     actualizados = 0
-    with get_engine().begin() as conn:
+    with _traducir_errores(), get_engine().begin() as conn:
         # Una sola vez: es local a la transacción y cubre todo el lote.
-        _sellar_autor(conn, autor, origen)
+        _sellar_autor(conn, autor, origen, motivo)
         for nombre, ts_entrada_str, cambios in cambios_por_entrada:
             ts = _a_ts(ts_entrada_str)
             if ts is None:
@@ -367,40 +413,12 @@ def actualizar_varios_por_entrada(cambios_por_entrada: list,
                 continue
             params["w_nombre"] = _normalizar_cmp(nombre)
             params["w_ts"] = ts
-            res = conn.execute(
-                text(f"UPDATE turnos SET {set_sql} "
-                     "WHERE lower(nombre) = :w_nombre AND ts_entrada = :w_ts"),
-                params,
-            )
+            res = conn.execute(text(f"UPDATE turnos SET {set_sql} {_WHERE_POR_ENTRADA}"), params)
             actualizados += res.rowcount
     if actualizados:
-        leer_registros.clear()
-        leer_historico.clear()
+        _limpiar_caches()
         _espejo(sheets_backup.espejo_actualizar_varios, cambios_por_entrada)
     return actualizados
-
-
-def eliminar_por_entrada(nombre: str, ts_entrada_str: str,
-                         *, autor: str, origen: str) -> bool:
-    """Elimina la fila que matchea (Nombre, Timestamp Entrada). Destructivo.
-
-    La fila borrada queda completa en turnos_auditoria, que no tiene foreign
-    key contra turnos justamente para sobrevivir a este caso."""
-    ts = _a_ts(ts_entrada_str)
-    if ts is None:
-        return False
-    with get_engine().begin() as conn:
-        _sellar_autor(conn, autor, origen)
-        res = conn.execute(
-            text("DELETE FROM turnos WHERE lower(nombre) = :n AND ts_entrada = :t"),
-            {"n": _normalizar_cmp(nombre), "t": ts},
-        )
-    if res.rowcount == 0:
-        return False
-    leer_registros.clear()
-    leer_historico.clear()
-    _espejo(sheets_backup.espejo_eliminar, nombre, ts_entrada_str)
-    return True
 
 
 def archivar_historico(solo_un_mes: bool) -> dict:
@@ -409,7 +427,10 @@ def archivar_historico(solo_un_mes: bool) -> dict:
 
     Si `solo_un_mes` es True (uso automático) y lo pendiente abarca más de un
     mes calendario, no archiva y devuelve bloqueado=True (el backlog inicial se
-    resuelve a mano). Devuelve {'archivadas', 'bloqueado', 'meses'}."""
+    resuelve a mano). Devuelve {'archivadas', 'bloqueado', 'meses'}.
+
+    Archivar no es cerrar el periodo: solo separa el histórico en el panel.
+    Cerrar un mes, para que no admita más cambios, es cerrar_periodo."""
     inicio_mes = now_ecuador().date().replace(day=1)
     try:
         with get_engine().connect() as conn:
@@ -427,9 +448,9 @@ def archivar_historico(solo_un_mes: bool) -> dict:
 
         with get_engine().begin() as conn:
             # El trigger de auditoría ignora los cambios que solo tocan
-            # `archivado` y `actualizado_en`, así que este UPDATE en bloque no
-            # ensucia la bitácora. Se sella igual, para que quede atribuido si
-            # algún día la condición del trigger se amplía.
+            # `archivado` y `actualizado_en`, y el de periodos los deja pasar
+            # aunque el mes esté cerrado. Se sella igual, para que quede
+            # atribuido si algún día la condición del trigger se amplía.
             _sellar_autor(conn, "archivado_mensual", ORIGEN_SISTEMA)
             res = conn.execute(
                 text("UPDATE turnos SET archivado = true, actualizado_en = now() "
@@ -437,8 +458,7 @@ def archivar_historico(solo_un_mes: bool) -> dict:
                      "AND fecha_turno < :corte"),
                 {"corte": inicio_mes},
             )
-        leer_registros.clear()
-        leer_historico.clear()
+        _limpiar_caches()
         _espejo(sheets_backup.espejo_archivar)
         return {"archivadas": res.rowcount, "bloqueado": False, "meses": meses}
     except Exception as e:
@@ -468,3 +488,270 @@ def buscar_turno_abierto_idx(df: pd.DataFrame, nombre: str):
     legacy = nombre_mask & (obs == "abierto") & (estado == "")
     idxs = df.index[legacy].tolist()
     return idxs[0] if idxs else None
+
+
+# ---------------------------------------------------------------------------
+# Ajustes: corrección y anulación con motivo y, si corresponde, aprobación
+# ---------------------------------------------------------------------------
+# La regla que decide si un ajuste necesita aprobación vive en la base
+# (V009, regla 'aprobacion_desde_recorte_extra_h'). Aquí no se replica: la
+# respuesta de la base dice si quedó aplicado o pendiente.
+
+def _id_por_entrada(conn, nombre: str, ts) -> int | None:
+    return conn.execute(
+        text(f"SELECT id FROM turnos {_WHERE_POR_ENTRADA}"),
+        {"w_nombre": _normalizar_cmp(nombre), "w_ts": ts},
+    ).scalar()
+
+
+def _resultado_ajuste(fila) -> dict:
+    return {"id": fila["id"], "estado": fila["estado"],
+            "requiere_aprobacion": bool(fila["requiere_aprobacion"]),
+            "delta_extra": float(fila["delta_extra"])}
+
+
+def solicitar_correccion(nombre: str, ts_entrada_str: str, nueva_entrada: datetime,
+                         nueva_salida: datetime, observacion: str, *, motivo: str,
+                         autor: str) -> dict | None:
+    """Solicita corregir el horario de un turno cerrado.
+
+    Devuelve {'id', 'estado', 'requiere_aprobacion', 'delta_extra'}; estado es
+    'aplicado' si la corrección se hizo en el acto o 'pendiente' si espera a
+    otro administrador. None si el turno ya no existe. Levanta ReglaDeNegocio
+    si la base la rechaza (motivo corto, periodo cerrado, duración imposible)."""
+    ts = _a_ts(ts_entrada_str)
+    if ts is None:
+        return None
+    with _traducir_errores(), get_engine().begin() as conn:
+        tid = _id_por_entrada(conn, nombre, ts)
+        if tid is None:
+            return None
+        fila = conn.execute(
+            text("SELECT id, estado, requiere_aprobacion, delta_extra "
+                 "FROM solicitar_correccion(:id, :e, :s, :o, :m, :u)"),
+            {"id": tid, "e": nueva_entrada, "s": nueva_salida, "o": observacion,
+             "m": motivo, "u": autor},
+        ).mappings().one()
+    resultado = _resultado_ajuste(fila)
+    if resultado["estado"] == "aplicado":
+        _limpiar_caches()
+        _espejo(sheets_backup.espejo_actualizar, nombre, ts_entrada_str, {
+            "Timestamp Entrada": nueva_entrada.strftime(TS_FMT),
+            "Timestamp Salida": nueva_salida.strftime(TS_FMT),
+            "Observaciones": observacion,
+        })
+    return resultado
+
+
+def solicitar_anulacion(nombre: str, ts_entrada_str: str, *, motivo: str, autor: str) -> dict | None:
+    """Solicita anular un turno. Mismo contrato que solicitar_correccion."""
+    ts = _a_ts(ts_entrada_str)
+    if ts is None:
+        return None
+    with _traducir_errores(), get_engine().begin() as conn:
+        tid = _id_por_entrada(conn, nombre, ts)
+        if tid is None:
+            return None
+        fila = conn.execute(
+            text("SELECT id, estado, requiere_aprobacion, delta_extra "
+                 "FROM solicitar_anulacion(:id, :m, :u)"),
+            {"id": tid, "m": motivo, "u": autor},
+        ).mappings().one()
+    resultado = _resultado_ajuste(fila)
+    if resultado["estado"] == "aplicado":
+        _limpiar_caches()
+        _espejo(sheets_backup.espejo_eliminar, nombre, ts_entrada_str)
+    return resultado
+
+
+def aprobar_ajuste(ajuste_id: int, *, usuario: str, comentario: str = "") -> None:
+    with _traducir_errores(), get_engine().begin() as conn:
+        conn.execute(text("SELECT aprobar_ajuste(:id, :u, :c)"),
+                     {"id": int(ajuste_id), "u": usuario, "c": comentario})
+    _limpiar_caches()
+    leer_ajustes.clear()
+
+
+def rechazar_ajuste(ajuste_id: int, *, usuario: str, comentario: str) -> None:
+    with _traducir_errores(), get_engine().begin() as conn:
+        conn.execute(text("SELECT rechazar_ajuste(:id, :u, :c)"),
+                     {"id": int(ajuste_id), "u": usuario, "c": comentario})
+    leer_ajustes.clear()
+
+
+# Los horarios de `antes` y `propuesto` son texto dentro de un jsonb. El de
+# `antes` lleva zona desde V102 y el de `propuesto` no; pasarlos por
+# timestamptz y de vuelta a la hora de Ecuador los deja iguales en los dos casos.
+_HORA_JSON = "to_char(({c})::timestamptz AT TIME ZONE 'America/Guayaquil', 'YYYY-MM-DD HH24:MI')"
+
+_SELECT_AJUSTES = f"""
+SELECT a.id, t.nombre, t.area, t.fecha_turno, a.tipo, a.estado, a.motivo,
+       a.solicitado_por, a.solicitado_en AT TIME ZONE 'America/Guayaquil' AS solicitado_en,
+       {_HORA_JSON.format(c="a.antes ->> 'ts_entrada'")}     AS entrada_antes,
+       {_HORA_JSON.format(c="a.antes ->> 'ts_salida'")}      AS salida_antes,
+       {_HORA_JSON.format(c="a.propuesto ->> 'ts_entrada'")} AS entrada_propuesta,
+       {_HORA_JSON.format(c="a.propuesto ->> 'ts_salida'")}  AS salida_propuesta,
+       (a.antes ->> 'horas_trabajadas')::numeric AS horas_antes,
+       a.delta_horas, a.delta_extra, a.requiere_aprobacion,
+       a.revisado_por, a.revisado_en AT TIME ZONE 'America/Guayaquil' AS revisado_en,
+       a.comentario_revision
+FROM ajustes_turno a
+JOIN turnos t ON t.id = a.turno_id
+WHERE (:estado = '' OR a.estado = :estado)
+  AND a.solicitado_en >= :desde
+ORDER BY a.solicitado_en DESC
+"""
+
+
+@st.cache_data(ttl=60)
+def leer_ajustes(estado: str = "", desde: date | None = None) -> pd.DataFrame:
+    """Ajustes solicitados, del más reciente al más viejo. `estado` vacío trae
+    todos. Sin `desde`, los de los últimos 90 días."""
+    if desde is None:
+        desde = (pd.Timestamp(now_ecuador().date()) - pd.Timedelta(days=90)).date()
+    with get_engine().connect() as conn:
+        rows = conn.execute(text(_SELECT_AJUSTES), {"estado": estado, "desde": desde}).mappings().all()
+    return pd.DataFrame([dict(r) for r in rows])
+
+
+# ---------------------------------------------------------------------------
+# Periodos de nómina
+# ---------------------------------------------------------------------------
+@st.cache_data(ttl=60)
+def leer_periodos() -> pd.DataFrame:
+    """Un renglón por cada mes con turnos, con su estado de cierre y el último
+    movimiento. Un mes sin fila en periodos_nomina está abierto."""
+    sql = """
+    WITH meses AS (
+        SELECT DISTINCT extract(year from fecha_turno)::int AS anio,
+                        extract(month from fecha_turno)::int AS mes
+        FROM turnos WHERE NOT anulado
+    )
+    SELECT m.anio, m.mes, coalesce(p.estado, 'abierto') AS estado,
+           p.cambiado_por, p.cambiado_en AT TIME ZONE 'America/Guayaquil' AS cambiado_en,
+           (SELECT count(*) FROM periodos_eventos e
+             WHERE e.anio = m.anio AND e.mes = m.mes AND e.accion = 'reapertura') AS reaperturas
+    FROM meses m
+    LEFT JOIN periodos_nomina p ON p.anio = m.anio AND p.mes = m.mes
+    ORDER BY m.anio DESC, m.mes DESC
+    """
+    with get_engine().connect() as conn:
+        rows = conn.execute(text(sql)).mappings().all()
+    return pd.DataFrame([dict(r) for r in rows])
+
+
+def cerrar_periodo(anio: int, mes: int, *, usuario: str, motivo: str = "") -> None:
+    with _traducir_errores(), get_engine().begin() as conn:
+        conn.execute(text("SELECT cerrar_periodo(:a, :m, :u, :mot)"),
+                     {"a": int(anio), "m": int(mes), "u": usuario, "mot": motivo})
+    leer_periodos.clear()
+
+
+def reabrir_periodo(anio: int, mes: int, *, usuario: str, motivo: str) -> None:
+    with _traducir_errores(), get_engine().begin() as conn:
+        conn.execute(text("SELECT reabrir_periodo(:a, :m, :u, :mot)"),
+                     {"a": int(anio), "m": int(mes), "u": usuario, "mot": motivo})
+    leer_periodos.clear()
+
+
+# ---------------------------------------------------------------------------
+# Ausencias (eventualidades)
+# ---------------------------------------------------------------------------
+_INSERT_TURNO_AUSENCIA = text(
+    "INSERT INTO turnos (nombre, area, fecha_turno, ts_entrada, ts_salida, "
+    "horas_trabajadas, horas_efectivas, horas_extra, estado, evento, observaciones, ausencia_id) "
+    "VALUES (:nombre, :area, :fecha_turno, :ts_entrada, :ts_salida, "
+    ":horas_trabajadas, :horas_efectivas, :horas_extra, :estado, :evento, :observaciones, :ausencia_id) "
+    "ON CONFLICT ((lower(nombre)), ts_entrada) WHERE NOT anulado DO NOTHING"
+)
+
+
+def registrar_ausencia(nombre: str, area: str, tipo: str, subtipo: str, filas: list,
+                       *, autor: str, motivo: str) -> int:
+    """Registra una eventualidad: la solicitud en `ausencias` y un turno por
+    día en `turnos`, atados por ausencia_id, en una sola transacción.
+
+    `filas` son los turnos ya armados por el panel, con las claves en español.
+    Devuelve cuántos días se insertaron; los que ya existían se omiten."""
+    lote = [p for p in (_fila_a_params(f) for f in filas) if p["ts_entrada"] is not None]
+    if not lote:
+        return 0
+    fechas = [p["fecha_turno"] for p in lote]
+    with _traducir_errores(), get_engine().begin() as conn:
+        _sellar_autor(conn, autor, ORIGEN_ADMIN, motivo)
+        ausencia_id = conn.execute(
+            text("INSERT INTO ausencias (empleado_id, nombre, tipo, subtipo, desde, hasta, registrado_por) "
+                 "VALUES ((SELECT id FROM empleados WHERE lower(nombre) = lower(:n)), "
+                 "        :n, :t, :s, :d, :h, :u) RETURNING id"),
+            {"n": nombre, "t": tipo, "s": subtipo or "", "d": min(fechas), "h": max(fechas), "u": autor},
+        ).scalar()
+        insertados = 0
+        for p in lote:
+            res = conn.execute(_INSERT_TURNO_AUSENCIA, dict(p, evento=tipo, ausencia_id=ausencia_id))
+            insertados += res.rowcount
+    _limpiar_caches()
+    if insertados:
+        _espejo(sheets_backup.espejo_append_batch, filas)
+    return insertados
+
+
+# ---------------------------------------------------------------------------
+# Auditoría (lectura para la pestaña del panel)
+# ---------------------------------------------------------------------------
+# Turnos cuyo horario vigente no coincide con lo que se marcó en el reloj. Es
+# la consulta que responde "a quién le cambiaron las horas": la diferencia
+# entre `marcaciones` (inmutable) y `turnos` (vigente). El umbral de 2 minutos
+# absorbe el truncado de segundos de correcciones anteriores a esta versión.
+_SELECT_DIFERENCIAS = """
+SELECT t.nombre, t.area, t.fecha_turno,
+       to_char(me.momento AT TIME ZONE 'America/Guayaquil', 'YYYY-MM-DD HH24:MI') AS marco_entrada,
+       to_char(ms.momento AT TIME ZONE 'America/Guayaquil', 'YYYY-MM-DD HH24:MI') AS marco_salida,
+       to_char(t.ts_entrada, 'YYYY-MM-DD HH24:MI') AS vigente_entrada,
+       to_char(t.ts_salida,  'YYYY-MM-DD HH24:MI') AS vigente_salida,
+       round((extract(epoch from ms.momento - me.momento) / 3600)::numeric, 2) AS horas_marcadas,
+       t.horas_trabajadas AS horas_vigentes,
+       greatest(0, round((extract(epoch from ms.momento - me.momento) / 3600)::numeric, 2)
+                   - regla('jornada_base_h')) - coalesce(t.horas_extra, 0) AS extra_quitada,
+       me.origen AS origen_marcacion
+FROM turnos t
+JOIN marcaciones me ON me.turno_id = t.id AND me.tipo = 'entrada'
+JOIN marcaciones ms ON ms.turno_id = t.id AND ms.tipo = 'salida'
+WHERE NOT t.anulado
+  AND t.fecha_turno >= :desde
+  AND (abs(extract(epoch from (t.ts_entrada::timestamptz - me.momento))) > 120
+    OR abs(extract(epoch from (t.ts_salida::timestamptz  - ms.momento))) > 120)
+ORDER BY extra_quitada DESC, t.fecha_turno DESC
+"""
+
+
+@st.cache_data(ttl=60)
+def leer_diferencias_marcacion(desde: date) -> pd.DataFrame:
+    with get_engine().connect() as conn:
+        rows = conn.execute(text(_SELECT_DIFERENCIAS), {"desde": desde}).mappings().all()
+    return pd.DataFrame([dict(r) for r in rows])
+
+
+_SELECT_BITACORA = """
+SELECT a.momento AT TIME ZONE 'America/Guayaquil' AS momento, a.usuario, a.origen,
+       CASE WHEN a.accion = 'DELETE' THEN 'borrado'
+            WHEN (a.despues ->> 'anulado')::boolean AND NOT coalesce((a.antes ->> 'anulado')::boolean, false)
+                THEN 'anulacion'
+            ELSE 'cambio' END AS accion,
+       a.nombre, a.fecha_turno, a.horas_antes, a.horas_despues, a.delta_horas,
+       (a.antes ->> 'horas_extra')::numeric   AS extra_antes,
+       (a.despues ->> 'horas_extra')::numeric AS extra_despues,
+       a.motivo, a.ajuste_id
+FROM turnos_auditoria a
+WHERE a.origen IN ('admin', 'fuera_de_la_app')
+  AND a.momento >= :desde
+ORDER BY a.momento DESC
+LIMIT 2000
+"""
+
+
+@st.cache_data(ttl=60)
+def leer_bitacora_supervision(desde: date) -> pd.DataFrame:
+    """Cambios de supervisión y ediciones hechas por fuera de la aplicación."""
+    with get_engine().connect() as conn:
+        rows = conn.execute(text(_SELECT_BITACORA), {"desde": desde}).mappings().all()
+    return pd.DataFrame([dict(r) for r in rows])

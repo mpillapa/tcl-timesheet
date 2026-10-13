@@ -11,6 +11,10 @@ __pycache__/
 venv/
 env/
 .env
+.pytest_cache/
+
+# Respaldos de la base: llevan datos de personas (ver migracion/README.md)
+*.dump
 
 # IDE
 .vscode/

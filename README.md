@@ -82,6 +82,13 @@ La fecha de turno es siempre la fecha de la entrada, aunque la salida caiga al
 día siguiente. Por eso los reportes agrupan bien los turnos nocturnos, y por
 eso corregir la hora de entrada de un turno también lo reubica en los gráficos.
 
+Desde las migraciones de [migracion/versiones/](migracion/versiones/), la base
+también impone las reglas que afectan a las horas: calcula trabajadas,
+efectivas y extra a partir del horario, rechaza turnos cruzados o de más de
+24 h, y exige un ajuste con motivo para corregir un turno cerrado. Los valores
+que usa están en la tabla `reglas_negocio`, que distingue los vigentes de los
+provisionales pendientes de decisión. Ver [migracion/README.md](migracion/README.md).
+
 Un caso que vale mencionar: `SCOPE_POR_PADRON_VIGENTE` en `core/config.py`
 decide si las horas se atribuyen al área actual del empleado o a la que tenía
 cuando marcó. Está en `True`, lo que significa que un jefe ve todo el historial
@@ -109,11 +116,17 @@ PROYECTO_HORAS_EXTRA/
 │   └── ui_utils.py         anti doble clic y mensajes diferidos
 ├── views/
 │   ├── colaborador.py      quiosco de marcación
-│   └── super_admin.py      panel administrativo
-├── migracion/              esquema SQL y migración inicial de Sheets a Supabase
+│   ├── super_admin.py      panel administrativo
+│   └── auditoria_panel.py  ajustes pendientes, periodos y auditoría del panel
+├── migracion/
+│   ├── versiones/          migraciones numeradas, fase A y fase B
+│   ├── aplicar_migraciones.py
+│   ├── validar_datos_existentes.py
+│   └── sincronizar_empleados.py
+├── pruebas/                pruebas automatizadas contra un PostgreSQL local
 ├── diagnostico/            script y bitácora de diagnóstico de conexión
-├── auditoria/              lectura de la bitácora de cambios y auditoría histórica
-├── seguridad/              habilitación de RLS en Supabase
+├── auditoria/              análisis de la bitácora, tablero y auditoría histórica
+├── seguridad/              RLS en Supabase, retención y acceso a los datos
 └── .streamlit/
     ├── secrets.toml        credenciales locales, no se versiona
     ├── secrets.toml.example plantilla versionada
@@ -123,7 +136,9 @@ PROYECTO_HORAS_EXTRA/
 La separación es intencional: las reglas de negocio están en `core/config.py` y
 `core/calculos.py`, el acceso a datos en `core/data.py` y `core/db.py`, la
 integración con Google en `core/sheets_backup.py` y la interfaz en `views/`.
-Ninguna vista habla directo con la base.
+Ninguna vista habla directo con la base. Las reglas que tienen que valer aunque
+alguien escriba por fuera de la aplicación viven en la propia base, en las
+migraciones.
 
 ## Puesta en marcha local
 
@@ -162,29 +177,54 @@ o el modo de conexión, corre el diagnóstico:
 ```
 
 No uses datos productivos en el ambiente local. Trabaja con un proyecto de
-Supabase aparte y un padrón de prueba.
+Supabase aparte y un padrón de prueba. La variable `TURNERO_DB_URL` tiene
+prioridad sobre secrets y sirve para apuntar la aplicación a otra base sin
+tocar el archivo, y `TURNERO_SIN_ESPEJO=1` apaga la réplica en Google Sheets.
+
+## Pruebas
+
+Requieren PostgreSQL 17 instalado. Levantan un servidor temporal, le aplican
+las migraciones con el mismo script que se usa en producción y prueban la base,
+la capa de datos y el panel. No leen la URL de producción ni escriben en Google
+Sheets.
+
+```powershell
+.venv\Scripts\python.exe -m pip install -r requirements-dev.txt
+.venv\Scripts\python.exe -m pytest pruebas
+```
+
+Si PostgreSQL no está en `C:\Program Files\PostgreSQL\17\bin`, indica la ruta
+con la variable `PG_BIN`.
 
 ## Base de datos
 
-Son tres tablas. Las dos primeras están en `migracion/schema.sql`:
+El esquema se define en migraciones numeradas, en
+[migracion/versiones/](migracion/versiones/), y se aplica con
+`migracion/aplicar_migraciones.py`. Al 2026-10-13 están escritas y probadas,
+pero todavía no aplicadas en producción: el orden de despliegue, en dos fases,
+está en [migracion/README.md](migracion/README.md).
 
-- `turnos`, con un registro por turno. La clave natural es el nombre más el
-  timestamp de entrada, con un índice único que además evita que un doble clic
-  duplique el turno. La columna `archivado` separa el mes activo del histórico.
-- `horas_esperadas`, con la meta de horas por año y mes. Se edita desde el Table
-  Editor de Supabase.
+Las tablas, una vez aplicadas:
 
-La tercera está en `migracion/auditoria_schema.sql`:
+- `turnos`, el turno vigente, el que se paga. Un turno no se borra, se anula.
+- `marcaciones`, lo que se marcó en el reloj, en una tabla que no se puede
+  editar. La diferencia con `turnos` es exactamente lo que se corrigió.
+- `ajustes_turno`, cada corrección y anulación con su motivo y, si quita 1 h
+  extra o más, la aprobación de otro administrador.
+- `turnos_auditoria`, la bitácora: cada cambio con la fila antes y después, el
+  autor, el origen y el motivo. De solo inserción. Existe desde el 2026-09-02,
+  después de una auditoría que no pudo medir las horas modificadas porque la
+  base no guardaba el valor anterior; ver [auditoria/README.md](auditoria/README.md).
+- `periodos_nomina` y `periodos_eventos`, el cierre de cada mes y cada
+  reapertura.
+- `empleados` y `ausencias`, la identidad de cada persona y las solicitudes de
+  permisos, faltas y vacaciones.
+- `reglas_negocio` y `horas_esperadas`, parámetros y metas.
 
-- `turnos_auditoria`, la bitácora de cambios. Un trigger sobre `turnos` graba
-  cada modificación y cada borrado con la fila completa antes y después, el
-  usuario que lo hizo y el origen del cambio. Retención indefinida: es el
-  respaldo de las horas que recorta supervisión. La aplicación no escribe en
-  ella, solo deja el autor en la sesión con `core.data._sellar_autor`.
-
-  Se creó el 2026-09-02, después de una auditoría que no pudo responder cuántas
-  horas se habían modificado porque la base no guardaba el valor anterior. El
-  detalle está en [auditoria/README.md](auditoria/README.md).
+La aplicación conecta con el rol `turnero_app`, que no puede borrar ni tocar la
+bitácora, en vez de con `postgres`. Toda escritura deja en la sesión el autor,
+el origen y el motivo con `core.data._sellar_autor`, y los triggers los toman de
+ahí.
 
 La conexión usa el Session pooler de Supabase en el puerto 5432. No lo cambies
 al pooler de transacción del puerto 6543: desde la red de la empresa ese puerto
@@ -195,9 +235,11 @@ Los tiempos límite del engine, los keepalives de TCP y el reintento de lecturas
 existen por un incidente concreto de cuelgues indefinidos. Antes de tocar esos
 valores, lee [diagnostico/README.md](diagnostico/README.md).
 
-RLS está habilitado en las tres tablas sin políticas, lo que cierra la API REST
-de Supabase sin afectar a la aplicación, que conecta por Postgres directo. Ver
-[seguridad/README.md](seguridad/README.md).
+RLS está habilitado en todas las tablas, sin políticas para los roles públicos,
+lo que cierra la API REST de Supabase. El rol de la aplicación tiene su propia
+política. Ver [seguridad/README.md](seguridad/README.md) y, sobre cuánto se
+conservan los datos de auditoría y quién los ve,
+[seguridad/retencion_y_acceso.md](seguridad/retencion_y_acceso.md).
 
 ## Despliegue
 
@@ -215,8 +257,14 @@ local y no viajan por el repositorio. Cada push a `main` redespliega.
 - [seguridad/README.md](seguridad/README.md): RLS en el schema público, qué
   expone el problema y por qué habilitarlo no rompe la aplicación.
 - [auditoria/README.md](auditoria/README.md): la bitácora de cambios y cómo
-  leerla, más la auditoría del 2026-09-02 que la motivó, con lo que se pudo
-  medir de las correcciones anteriores y lo que ya no se puede.
+  leerla, el resultado de septiembre de 2026 medido con ella, más la auditoría
+  del 2026-09-02 que la motivó, con lo que se pudo medir de las correcciones
+  anteriores y lo que ya no se puede.
+- [migracion/README.md](migracion/README.md): el modelo de datos, las
+  migraciones, el despliegue en dos fases y las decisiones de negocio que
+  siguen pendientes.
+- [seguridad/retencion_y_acceso.md](seguridad/retencion_y_acceso.md): qué datos
+  personales guarda la auditoría y qué falta decidir sobre ellos.
 
 ## Limitaciones conocidas
 
@@ -230,14 +278,17 @@ local y no viajan por el repositorio. Cada push a `main` redespliega.
   cambia nada en la base.
 - La bitácora solo cubre desde el 2026-09-02. Lo anterior a esa fecha no tiene
   valor previo registrado y no se puede reconstruir, salvo lo que ya quedó
-  medido en [auditoria/README.md](auditoria/README.md).
-- No hay regla de negocio que limite una corrección. Un administrador puede
-  reducir las horas de un turno cerrado sin tope y sin segunda aprobación.
-  Ahora queda registrado, pero no impedido.
-- No hay una vista de la bitácora en el panel. Se consulta desde Supabase o
-  con `auditoria/bitacora.py`.
-- No hay pruebas automatizadas. `auditoria/verificar_bitacora.py` y
-  `diagnostico/probar_conexion.py` son comprobaciones que se corren a mano.
+  medido en [auditoria/README.md](auditoria/README.md). Las marcaciones
+  anteriores a la migración son reconstruidas con lo que se sabe.
+- Las migraciones que limitan las correcciones, exigen motivo y bloquean los
+  meses cerrados están escritas y probadas, pero no aplicadas en producción al
+  2026-10-13. Hasta aplicarlas, un administrador sigue pudiendo reducir horas
+  sin tope ni segunda aprobación, como pasó en septiembre de 2026.
+- Varios valores de esas reglas son provisionales: el umbral de aprobación, la
+  duración máxima, quién aprueba y quién cierra meses. Los tiene que decidir
+  Recursos Humanos; la lista está en [migracion/README.md](migracion/README.md).
+- La identidad de quien hace cada cambio la pone la aplicación, a partir de
+  usuarios y contraseñas en secrets. La base la registra, pero no la verifica.
 
 ## Licencia
 

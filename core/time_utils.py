@@ -46,3 +46,15 @@ def parse_fecha_flexible(raw):
     """Igual que parse_timestamp_flexible, pero solo la fecha."""
     dt = parse_timestamp_flexible(raw)
     return dt.date() if dt is not None else None
+
+
+def conservar_segundos(original, nuevo: datetime) -> datetime:
+    """El formulario de corrección edita horas y minutos, no segundos. Si el
+    administrador no tocó la hora, se conserva la original completa.
+
+    Antes se truncaba a cero, y cada corrección movía la marca unos segundos
+    sin que nadie lo decidiera: 136 de los cambios de entrada de septiembre de
+    2026 eran solo eso, y había que filtrarlos a mano en la auditoría."""
+    if original is not None and original.replace(second=0, microsecond=0) == nuevo:
+        return original
+    return nuevo

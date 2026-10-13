@@ -3,7 +3,12 @@
 La URL de conexión vive en secrets bajo [connections.supabase]:
 
     [connections.supabase]
-    url = "postgresql://postgres.xxxx:CLAVE@aws-0-us-east-1.pooler.supabase.com:5432/postgres"
+    url = "postgresql://turnero_app.xxxx:CLAVE@aws-0-us-east-1.pooler.supabase.com:5432/postgres"
+
+El usuario es el rol propio de la aplicación desde la migración V010; antes era
+`postgres`, y el código funciona con los dos. La variable de entorno
+TURNERO_DB_URL tiene prioridad sobre secrets, para apuntar a una base de
+pruebas sin tocar el archivo.
 
 Usa el "Session pooler" de Supabase, puerto 5432 (compatible con IPv4,
 necesario para Streamlit Cloud). El engine se crea una sola vez por proceso.
@@ -18,6 +23,7 @@ diagnostico/README.md; leerlo antes de tocar estos valores.
 """
 
 import functools
+import os
 import time
 from pathlib import Path
 
@@ -31,6 +37,8 @@ _engine = None
 ESPERA_CONEXION_SEG = 10      # establecer la conexión
 ESPERA_CONSULTA_MS = 30_000   # ejecutar una consulta (statement_timeout)
 ESPERA_POOL_SEG = 15          # obtener una conexión libre del pool
+
+ZONA_HORARIA = "America/Guayaquil"
 
 # Tiene que ser menor que lo que tarda el pooler (y cualquier NAT intermedio) en
 # descartar una conexión inactiva. Estaba en 1800 s, muy por encima del umbral.
@@ -80,6 +88,13 @@ def reintento_de_lectura(func):
 
 
 def _leer_url_db() -> str:
+    # 0) Variable de entorno. Va primero para que las pruebas y el desarrollo
+    #    local apunten a una base de pruebas sin riesgo de que se cuele la URL
+    #    de producción de secrets.toml. Ver pruebas/conftest.py.
+    url_env = os.environ.get("TURNERO_DB_URL", "").strip()
+    if url_env:
+        return url_env
+
     # 1) st.secrets: funciona en Streamlit Cloud y corriendo local con streamlit.
     try:
         import streamlit as st
@@ -142,9 +157,16 @@ def get_engine():
         # abrir el socket): con "connect" la primera consulta salía con 30 s y la
         # siguiente volvía a 2 min, porque el pooler descarta el estado de sesión
         # al reciclar la conexión. Cuesta un viaje extra por préstamo.
+        #
+        # La zona horaria va en el mismo viaje. La aplicación trabaja con la
+        # hora de Ecuador sin zona; cuando las columnas pasan a timestamptz
+        # (migracion/versiones/V102), esa hora se interpreta según la zona de
+        # la sesión, y la de Supabase por defecto es UTC. Fijarla aquí hace que
+        # sea correcta con cualquier rol, también con `postgres`.
         @event.listens_for(_engine, "checkout")
-        def _limitar_duracion_consultas(dbapi_conn, _record, _proxy):
+        def _preparar_sesion(dbapi_conn, _record, _proxy):
             with dbapi_conn.cursor() as cur:
-                cur.execute(f"SET statement_timeout = {ESPERA_CONSULTA_MS}")
+                cur.execute(f"SET statement_timeout = {ESPERA_CONSULTA_MS}; "
+                            f"SET TIME ZONE '{ZONA_HORARIA}'")
 
     return _engine

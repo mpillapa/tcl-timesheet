@@ -1,6 +1,15 @@
 """Comprueba, contra la base real, que la bitácora de auditoría funciona.
 
-El proyecto no tiene pruebas automatizadas, así que esto sigue el patrón de
+RETIRADO desde las migraciones de migracion/versiones/. Se conserva como
+registro de cómo se verificó la bitácora el 2026-09-02, pero se niega a correr
+sobre una base migrada: borra su turno de prueba y sus filas de bitácora, y
+desde V003 la bitácora es de solo inserción, de modo que dejaría un turno
+'ZZ PRUEBA' en producción. Las mismas comprobaciones, y muchas más, están en
+pruebas/ y corren contra una base local desechable:
+
+    .venv\\Scripts\\python.exe -m pytest pruebas
+
+Cuando se escribió, el proyecto no tenía pruebas automatizadas, así que esto sigue el patrón de
 diagnostico/probar_conexion.py: un script que se corre a mano y dice sí o no.
 
 Qué comprueba
@@ -190,6 +199,13 @@ def paso_2_ciclo(eng) -> None:
 def main() -> None:
     eng = motor()
     try:
+        with eng.connect() as conn:
+            migrada = conn.execute(sa.text(
+                "select to_regclass('public.schema_migraciones') is not null")).scalar()
+        if migrada:
+            print("La base ya tiene las migraciones versionadas: este script está retirado.")
+            print(r"Usa las pruebas automatizadas: .venv\Scripts\python.exe -m pytest pruebas")
+            sys.exit(1)
         if "--limpiar" in sys.argv:
             print(f"Borradas {limpiar(eng)} filas de prueba.")
             return

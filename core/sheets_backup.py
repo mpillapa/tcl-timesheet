@@ -16,6 +16,7 @@ lectura completa de la hoja: en el respaldo el orden es cosmético.
 """
 
 import logging
+import os
 import queue
 import threading
 
@@ -90,7 +91,13 @@ def errores_espejo() -> list:
 
 
 def espejo_habilitado() -> bool:
-    """True si el respaldo en Sheets está activo (default: activo)."""
+    """True si el respaldo en Sheets está activo (default: activo).
+
+    TURNERO_SIN_ESPEJO lo apaga sin mirar secrets. Lo fija pruebas/conftest.py:
+    sin eso, una prueba que escribe en la base de pruebas replicaría el cambio
+    en la hoja real, cuyas credenciales están en secrets.toml."""
+    if os.environ.get("TURNERO_SIN_ESPEJO"):
+        return False
     try:
         return bool(st.secrets["backup"].get("espejo_sheets", True))
     except Exception:

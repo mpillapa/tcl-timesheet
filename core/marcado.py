@@ -15,6 +15,7 @@ from core.data import (
     calcular_horas_efectivas,
     calcular_horas_extra,
     buscar_turno_abierto_idx,
+    ReglaDeNegocio,
     ORIGEN_COLABORADOR,
     ORIGEN_SISTEMA,
 )
@@ -35,8 +36,18 @@ def _fmt_duracion(horas: float) -> str:
     return f"{h}h {m:02d}min"
 
 
-def _crear_nueva_entrada(nombre: str, ahora: datetime) -> None:
-    append_registro({
+def _crear_nueva_entrada(nombre: str, ahora: datetime) -> bool:
+    """True si la entrada quedó registrada. Un rechazo de la base, por ejemplo
+    porque el horario se cruza con otro turno, se muestra y devuelve False."""
+    try:
+        return _insertar_entrada(nombre, ahora)
+    except ReglaDeNegocio as e:
+        st.error(f"No se pudo registrar la entrada: {e}")
+        return False
+
+
+def _insertar_entrada(nombre: str, ahora: datetime) -> bool:
+    return append_registro({
         "Nombre": nombre,
         "Area": AREA_DE.get(nombre, ""),
         "Fecha de Turno": ahora.strftime("%Y-%m-%d"),
@@ -47,7 +58,7 @@ def _crear_nueva_entrada(nombre: str, ahora: datetime) -> None:
         "Horas Extra": "",
         "Estado": "Abierto",
         "Observaciones": "",
-    })
+    }, autor=nombre, origen=ORIGEN_COLABORADOR)
 
 
 def programar_cierre_sesion() -> None:
@@ -56,12 +67,13 @@ def programar_cierre_sesion() -> None:
 
 
 def guardar_salida(nombre: str, ts_entrada_str: str, ts_salida, horas, observacion,
-                   *, autor: str = None, origen: str = None) -> bool:
+                   *, autor: str = None, origen: str = None, motivo: str = "") -> bool:
     """Cierra el turno (Nombre, Timestamp Entrada). False si ya no existe.
 
     Por defecto se atribuye al propio colaborador, que es el caso del quiosco.
-    El panel de admin pasa su usuario cuando cierra un turno en revisión, para
-    que la bitácora distinga un cierre propio de uno hecho por supervisión."""
+    El panel de admin pasa su usuario y el motivo cuando cierra un turno en
+    revisión, para que la bitácora distinga un cierre propio de uno hecho por
+    supervisión. Un rechazo de la base levanta ReglaDeNegocio."""
     cambios = {
         "Timestamp Salida": ts_salida.strftime(TS_FMT),
         "Horas Trabajadas": horas,
@@ -74,6 +86,7 @@ def guardar_salida(nombre: str, ts_entrada_str: str, ts_salida, horas, observaci
         nombre, ts_entrada_str, cambios,
         autor=autor if autor is not None else nombre,
         origen=origen if origen is not None else ORIGEN_COLABORADOR,
+        motivo=motivo,
     )
 
 
@@ -110,16 +123,20 @@ def marcar_entrada(nombre: str) -> None:
             )
             obs_nueva = f"{obs_prev} | {tag_revision}" if obs_prev else tag_revision
 
-            actualizado = actualizar_por_entrada(
-                nombre,
-                ts_prev_str,
-                {
-                    "Estado": ESTADO_REVISION,
-                    "Observaciones": obs_nueva,
-                },
-                autor=nombre,
-                origen=ORIGEN_COLABORADOR,
-            )
+            try:
+                actualizado = actualizar_por_entrada(
+                    nombre,
+                    ts_prev_str,
+                    {
+                        "Estado": ESTADO_REVISION,
+                        "Observaciones": obs_nueva,
+                    },
+                    autor=nombre,
+                    origen=ORIGEN_COLABORADOR,
+                )
+            except ReglaDeNegocio as e:
+                st.error(f"No se pudo enviar el turno anterior a revisión: {e}")
+                return
 
             if not actualizado:
                 st.error(
@@ -128,7 +145,8 @@ def marcar_entrada(nombre: str) -> None:
                 )
                 return
 
-            _crear_nueva_entrada(nombre, ahora)
+            if not _crear_nueva_entrada(nombre, ahora):
+                return
             st.warning(
                 f"El turno anterior de **{nombre}** ("
                 f"{horas_abiertas:.1f} h abiertas) fue enviado a revisión de super admin. "
@@ -142,7 +160,8 @@ def marcar_entrada(nombre: str) -> None:
             )
         return
 
-    _crear_nueva_entrada(nombre, ahora)
+    if not _crear_nueva_entrada(nombre, ahora):
+        return
     st.success(f"Entrada registrada para **{nombre}** a las {ahora.strftime('%H:%M:%S')}")
     programar_cierre_sesion()
 
@@ -203,10 +222,15 @@ def marcar_salida(nombre: str) -> None:
             f"salida intentada {ahora.strftime('%Y-%m-%d %H:%M')})."
         )
         obs_nueva = f"{obs_prev} | {tag_revision}" if obs_prev else tag_revision
-        if not actualizar_por_entrada(
-            nombre, ts_entrada_str, {"Estado": ESTADO_REVISION, "Observaciones": obs_nueva},
-            autor=nombre, origen=ORIGEN_COLABORADOR,
-        ):
+        try:
+            enviado = actualizar_por_entrada(
+                nombre, ts_entrada_str, {"Estado": ESTADO_REVISION, "Observaciones": obs_nueva},
+                autor=nombre, origen=ORIGEN_COLABORADOR,
+            )
+        except ReglaDeNegocio as e:
+            st.error(f"No se pudo enviar el turno a revisión: {e}")
+            return
+        if not enviado:
             st.error("El turno ya no existe o no se pudo enviar a revisión. Refresca la página.")
             return
         # No se cierra sesión, a diferencia de una salida normal: el empleado
@@ -228,7 +252,12 @@ def marcar_salida(nombre: str) -> None:
         }
         return
 
-    if not guardar_salida(nombre, ts_entrada_str, ahora, horas, ""):
+    try:
+        guardada = guardar_salida(nombre, ts_entrada_str, ahora, horas, "")
+    except ReglaDeNegocio as e:
+        st.error(f"No se pudo registrar la salida: {e}")
+        return
+    if not guardada:
         st.error("El turno ya no existe (pudo haber sido modificado por un administrador). Refresca la página.")
         return
     st.success(
@@ -271,9 +300,15 @@ def barrer_turnos_olvidados(df) -> int:
             str(fila["Timestamp Entrada"]),
             {"Estado": ESTADO_REVISION, "Observaciones": obs_nueva},
         ))
-    return actualizar_varios_por_entrada(
-        cambios, autor="barrido_olvidados", origen=ORIGEN_SISTEMA
-    )
+    # Corre al abrir el panel: un rechazo no puede tumbarlo. Se avisa y se
+    # reintenta en la siguiente sesión.
+    try:
+        return actualizar_varios_por_entrada(
+            cambios, autor="barrido_olvidados", origen=ORIGEN_SISTEMA
+        )
+    except ReglaDeNegocio as e:
+        st.warning(f"No se pudieron enviar a revisión los turnos olvidados: {e}")
+        return 0
 
 
 def render_formulario_justificacion() -> None:
@@ -317,7 +352,12 @@ def render_formulario_justificacion() -> None:
 
         ts_salida = datetime.strptime(pend["ts_salida_str"], TS_FMT)
         obs = f"Horas extra justificadas: {justif.strip()}"
-        if not guardar_salida(pend["nombre"], pend["ts_entrada_str"], ts_salida, pend["horas"], obs):
+        try:
+            guardada = guardar_salida(pend["nombre"], pend["ts_entrada_str"], ts_salida, pend["horas"], obs)
+        except ReglaDeNegocio as e:
+            st.error(f"No se pudo registrar la salida: {e}")
+            return
+        if not guardada:
             st.error("No se encontró el turno a cerrar. Recarga la página.")
             return
 
