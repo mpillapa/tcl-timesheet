@@ -5,7 +5,7 @@ import pytest
 
 from conftest import insertar_turno, mes_pasado_cerrable
 
-MOTIVO = "Cierre de nómina enviado a Recursos Humanos"
+MOTIVO = "Cierre del mes revisado por supervisión"
 
 
 def _fecha(anio, mes, dia=10, hora="08:00:00"):

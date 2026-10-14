@@ -8,7 +8,7 @@ datos de personas.
 | Script | Para qué |
 |---|---|
 | [bitacora.py](bitacora.py) | Lee `turnos_auditoria`. Es la fuente buena, desde el 2026-09-02 |
-| [analisis_mensual.py](analisis_mensual.py) | Cuántas horas extra perdió un mes de nómina. Es la lectura que sirve para hablar con Recursos Humanos |
+| [analisis_mensual.py](analisis_mensual.py) | Cuántas horas extra perdió un mes de nómina. Es la lectura para la cifra de un mes completo |
 | [tablero_cambios.py](tablero_cambios.py) | Genera un HTML navegable para explorar turno por turno quién tocó qué horas |
 | [consultas_cambios.py](consultas_cambios.py) | Las consultas y la regla que decide qué cambio costó horas extra. Lo usa el tablero |
 | [verificar_bitacora.py](verificar_bitacora.py) | Retirado. Comprobaba la bitácora escribiendo en producción; lo reemplazan las pruebas de `pruebas/` |
@@ -240,7 +240,8 @@ El grueso de las correcciones se hizo con el mes ya cerrado. Los 1236 turnos de
 septiembre están archivados, y aun así 100 de los 220 cambios de supervisión se
 hicieron en octubre, incluidas 39.93 de las 57.51 h de recorte bruto. Si la
 nómina de septiembre ya se pagó, esas correcciones afectan a un periodo cerrado
-y habría que acordar con Recursos Humanos hasta cuándo se admite tocar un mes.
+y hay que fijar hasta cuándo se admite tocar un mes. Las migraciones ya
+traen el cierre de periodo para hacerlo cumplir.
 
 Seis de los nueve recortes de pmena no dejaron motivo escrito. La observación
 queda como `[Corrección 2026-10-07 por pmena] | [Orig]: ...`, sin texto entre el

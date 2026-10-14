@@ -1,4 +1,4 @@
-"""Correcciones y anulaciones como ajustes con motivo y aprobación (V009, V101)."""
+"""Correcciones y anulaciones como ajustes con motivo y aprobación (V009, V011, V101)."""
 
 import psycopg2
 import pytest
@@ -22,9 +22,54 @@ def _corregir(base, tid, entrada, salida, usuario="admin_a", motivo=MOTIVO, obs=
 
 def test_una_correccion_chica_se_aplica_sola(base_a):
     tid = _turno_largo(base_a)
-    _, estado, requiere = _corregir(base_a, tid, "2026-09-10 08:00", "2026-09-10 19:00")
+    _, estado, requiere = _corregir(base_a, tid, "2026-09-10 08:00", "2026-09-10 19:25")
     assert (estado, requiere) == ("aplicado", False)
-    assert float(base_a.uno("select horas_extra from turnos where id = %s", (tid,))[0]) == 2.0
+    assert float(base_a.uno("select horas_extra from turnos where id = %s", (tid,))[0]) == 2.42
+
+
+def _clase(base, aid):
+    return base.uno("select clase_de_ajuste(a) from ajustes_turno a where id = %s", (aid,))[0]
+
+
+def test_la_tolerancia_es_de_diez_minutos_exactos(base_a):
+    # Diez minutos se aplican; diez minutos y un segundo esperan.
+    tid = _turno_largo(base_a)
+    aid, estado, _ = _corregir(base_a, tid, "2026-09-10 08:00", "2026-09-10 19:20")
+    assert (estado, _clase(base_a, aid)) == ("aplicado", "menor")
+    aid, estado, _ = _corregir(base_a, tid, "2026-09-10 08:00", "2026-09-10 19:09:59")
+    assert (estado, _clase(base_a, aid)) == ("pendiente", "recorte")
+
+
+def test_un_recorte_sin_horas_extra_tambien_espera(base_a):
+    # 8 h a 7 h: no toca horas extra, pero quita una hora trabajada.
+    tid = insertar_turno(base_a, entrada="2026-09-10 08:00:00", salida="2026-09-10 16:00:00")
+    _, estado, requiere = _corregir(base_a, tid, "2026-09-10 08:00", "2026-09-10 15:00")
+    assert (estado, requiere) == ("pendiente", True)
+
+
+def test_sumar_tiempo_se_aplica_solo(base_a):
+    tid = insertar_turno(base_a, entrada="2026-09-10 08:00:00", salida="2026-09-10 16:00:00")
+    aid, estado, _ = _corregir(base_a, tid, "2026-09-10 07:00", "2026-09-10 17:00")
+    assert (estado, _clase(base_a, aid)) == ("aplicado", "suma")
+
+
+def test_cambiar_solo_el_comentario_no_mueve_el_turno(base_a):
+    tid = insertar_turno(base_a, entrada="2026-09-10 08:00:13", salida="2026-09-10 19:30:40",
+                         observaciones="Horas extra justificadas: cierre de vuelo")
+    aid, estado, _ = _corregir(base_a, tid, "2026-09-10 08:00:13", "2026-09-10 19:30:40",
+                               obs="[Corrección 2026-09-11 por admin_a]: " + MOTIVO
+                                   + " | [Orig]: Horas extra justificadas: cierre de vuelo")
+    assert (estado, _clase(base_a, aid)) == ("aplicado", "solo_comentario")
+    salida, obs = base_a.uno("select to_char(ts_salida, 'HH24:MI:SS'), observaciones from turnos where id = %s", (tid,))
+    assert salida == "19:30:40"
+    assert obs.startswith("[Corrección 2026-09-11 por admin_a]") and "[Orig]: Horas extra" in obs
+
+
+def test_perder_segundos_al_corregir_es_un_ajuste_menor(base_a):
+    # Lo que hacía el formulario anterior: guardar 19:30 en lugar de 19:30:40.
+    tid = insertar_turno(base_a, entrada="2026-09-10 08:00:13", salida="2026-09-10 19:30:40")
+    aid, estado, _ = _corregir(base_a, tid, "2026-09-10 08:00", "2026-09-10 19:30")
+    assert (estado, _clase(base_a, aid)) == ("aplicado", "menor")
 
 
 def test_un_recorte_grande_espera_a_otra_persona(base_a):
@@ -95,15 +140,32 @@ def test_anular_un_turno_con_horas_extra_requiere_aprobacion(base_a):
     assert (anulado, por, motivo) == (True, "admin_a", MOTIVO)
 
 
-def test_anular_un_turno_sin_extra_se_aplica_solo(base_a):
-    tid = insertar_turno(base_a, entrada="2026-09-10 08:00:00", salida="2026-09-10 17:00:00")
-    with base_a.cursor("turnero_app") as cur:
+def _anular(base, tid):
+    with base.cursor("turnero_app") as cur:
         cur.execute("select estado from solicitar_anulacion(%s, %s, 'admin_a')", (tid, MOTIVO))
-        assert cur.fetchone()[0] == "aplicado"
+        return cur.fetchone()[0]
+
+
+def test_anular_un_turno_de_trabajo_sin_extra_tambien_espera(base_a):
+    tid = insertar_turno(base_a, entrada="2026-09-10 08:00:00", salida="2026-09-10 17:00:00")
+    assert _anular(base_a, tid) == "pendiente"
+
+
+def test_anular_un_turno_abierto_o_muy_corto_se_aplica_solo(base_a):
+    # El caso de los turnos que quedaron abiertos por error.
+    assert _anular(base_a, insertar_turno(base_a, entrada="2026-09-10 08:00:00")) == "aplicado"
+    assert _anular(base_a, insertar_turno(base_a, nombre="Prueba Dos", entrada="2026-09-10 08:00:00",
+                                          salida="2026-09-10 08:05:00")) == "aplicado"
+
+
+def test_anular_una_eventualidad_se_aplica_sola(base_a):
+    tid = insertar_turno(base_a, entrada="2026-09-10 08:00:00", salida="2026-09-10 17:00:00",
+                         observaciones="Vacaciones: 2026-09-10")
+    assert _anular(base_a, tid) == "aplicado"
 
 
 def test_un_turno_anulado_no_se_edita_ni_se_reactiva(base_a):
-    tid = insertar_turno(base_a, entrada="2026-09-10 08:00:00", salida="2026-09-10 17:00:00")
+    tid = insertar_turno(base_a, entrada="2026-09-10 08:00:00", salida="2026-09-10 08:05:00")
     with base_a.cursor("turnero_app") as cur:
         cur.execute("select solicitar_anulacion(%s, %s, 'admin_a')", (tid, MOTIVO))
     for cambio in ["anulado = false, anulado_en = null, anulado_por = null, motivo_anulacion = null",
@@ -143,7 +205,7 @@ def test_fase_b_exige_motivo_a_toda_escritura_de_admin(base_b):
 
 
 def test_fase_b_permite_rehacer_un_turno_anulado_con_la_misma_entrada(base_b):
-    tid = insertar_turno(base_b, entrada="2026-09-10 08:00:00", salida="2026-09-10 17:00:00")
+    tid = insertar_turno(base_b, entrada="2026-09-10 08:00:00", salida="2026-09-10 08:05:00")
     with base_b.cursor("turnero_app") as cur:
         cur.execute("select solicitar_anulacion(%s, %s, 'admin_a')", (tid, MOTIVO))
     insertar_turno(base_b, entrada="2026-09-10 08:00:00", salida="2026-09-10 16:00:00")

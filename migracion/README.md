@@ -55,6 +55,7 @@ productivo aprobado por Tecnología. La última sección dice qué falta para es
 | [V008](versiones/V008__marcaciones.sql) | A | Marcaciones originales, con la carga de lo que se puede reconstruir |
 | [V009](versiones/V009__ajustes_con_aprobacion.sql) | A | Ajustes con motivo y aprobación |
 | [V010](versiones/V010__rol_de_la_aplicacion.sql) | A | El rol `turnero_app`, sin contraseña |
+| [V011](versiones/V011__tolerancia_de_recorte.sql) | A | La aprobación se mide en minutos quitados, con 10 min de tolerancia |
 | [V101](versiones/V101__exigir_ajustes_y_motivo.sql) | B | Enciende la obligación de ajuste y de motivo |
 | [V102](versiones/V102__horarios_con_zona.sql) | B | Entrada y salida a `timestamptz` |
 
@@ -221,22 +222,46 @@ falta: funciona con los dos tipos.
 Lo que no se vuelve atrás, a propósito: la bitácora, las marcaciones y los
 ajustes. Son el registro de lo que pasó.
 
+## Despliegue de V011
+
+La fase A se aplicó en producción el 2026-10-13. V011 es una migración de fase A
+que llegó después y se despliega en este orden:
+
+1. Respaldo, como en el paso 2.
+2. `aplicar_migraciones.py --desde-secrets --produccion --plan`: tiene que
+   aparecer solo V011.
+3. `aplicar_migraciones.py --desde-secrets --produccion`.
+4. Push del código. El panel nuevo llama a `clase_de_ajuste()`, que crea V011:
+   si el código llega antes, la pestaña de auditoría falla. Al revés no hay
+   problema, porque V011 no cambia ninguna firma que use el código desplegado.
+
+Los ajustes que ya estaban pendientes siguen pendientes: la regla nueva se
+aplica a lo que se solicite desde ese momento.
+
 ## Decisiones pendientes
 
-Las reglas de esta tabla están marcadas como `provisional` en
-`reglas_negocio`. Funcionan con el valor indicado, pero lo eligió Tecnología
-para poder construir el mecanismo. Cambiarlas es un `update` y no requiere
-desplegar nada.
+El turnero es una herramienta interna de control: estas decisiones las toman
+los superadmins responsables, no otra área. Las reglas de esta tabla están
+marcadas como `provisional` en `reglas_negocio`. Funcionan con el valor
+indicado, que se eligió para poder construir el mecanismo. Cambiarlas es un
+`update` y no requiere desplegar nada.
 
-| Decisión | Valor provisional | Quién debería decidir |
-|---|---|---|
-| Desde cuántas horas extra quitadas un ajuste necesita aprobación | 1 h | Recursos Humanos con Operaciones |
-| Quién puede aprobar ajustes | Nadie hasta que se configure `puede_aprobar` | Recursos Humanos |
-| Quién cierra y reabre meses, y hasta qué día se cierra cada mes | Nadie hasta configurar `gestiona_periodos`; cierre manual | Recursos Humanos con Nómina |
-| Duración máxima de un turno | 24 h | Operaciones |
-| Largo mínimo del motivo | 10 caracteres | Recursos Humanos |
-| Si un permiso cuenta como horas en el comparativo | Cuenta, como hasta ahora | Recursos Humanos |
-| Cuánto tiempo se conserva la bitácora y quién la lee | Indefinido | Recursos Humanos y Legal; ver [seguridad/retencion_y_acceso.md](../seguridad/retencion_y_acceso.md) |
+| Decisión | Valor provisional |
+|---|---|
+| Qué superadmins pueden aprobar ajustes | Nadie hasta que se configure `puede_aprobar` |
+| Qué superadmins cierran y reabren meses, y hasta qué día se cierra cada mes | Nadie hasta configurar `gestiona_periodos`; cierre manual |
+| Qué superadmins ven la auditoría | Nadie hasta configurar `ver_auditoria` |
+| Duración máxima de un turno | 24 h |
+| Largo mínimo del motivo | 10 caracteres |
+| Si un permiso cuenta como horas en el comparativo | Cuenta, como hasta ahora |
+| Cuánto tiempo se conserva la bitácora | Indefinido; ver [seguridad/retencion_y_acceso.md](../seguridad/retencion_y_acceso.md) |
+
+Decidido el 2026-10-14: una corrección que quita más de 10 minutos de tiempo
+trabajado, o la anulación de un turno de trabajo de más de 10 minutos, necesita
+la aprobación de otro superadmin. Hasta 10 minutos, sumar tiempo o cambiar solo
+el comentario se aplica en el acto. Es la regla `tolerancia_recorte_min`, que
+reemplaza al umbral provisional de 1 h extra; ver
+[V011](versiones/V011__tolerancia_de_recorte.sql).
 
 Mientras nadie tenga `puede_aprobar`, los ajustes grandes quedan esperando sin
 que nadie los pueda resolver. Es intencional que no haya un aprobador por

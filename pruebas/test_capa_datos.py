@@ -71,7 +71,8 @@ def test_una_correccion_sin_motivo_suficiente_se_rechaza_con_mensaje(datos):
 
 
 def test_anular_saca_el_turno_de_las_lecturas_y_queda_en_la_bitacora(datos):
-    _marca_y_cierra(datos, salida="2026-09-10 16:00:00")
+    # Un turno de cinco minutos: más largo, la anulación esperaría aprobación.
+    _marca_y_cierra(datos, salida="2026-09-10 08:05:00")
     res = datos.solicitar_anulacion("Prueba Uno", "2026-09-10 08:00:13", motivo=MOTIVO, autor="admin_a")
     assert res["estado"] == "aplicado"
     assert datos.leer_registros().empty
@@ -127,7 +128,7 @@ def test_la_hora_de_los_ajustes_es_la_de_ecuador_aunque_la_sesion_este_en_utc(da
     # Un ajuste se ve igual leído desde la aplicación que desde una sesión en UTC.
     _marca_y_cierra(datos)
     datos.solicitar_correccion("Prueba Uno", "2026-09-10 08:00:13", datetime(2026, 9, 10, 8, 0, 13),
-                               datetime(2026, 9, 10, 19, 0), "x " + MOTIVO, motivo=MOTIVO, autor="admin_a")
+                               datetime(2026, 9, 10, 19, 25), "x " + MOTIVO, motivo=MOTIVO, autor="admin_a")
     hora = base_b.uno("set time zone 'UTC'; select to_char(ts_salida at time zone 'America/Guayaquil', 'HH24:MI') "
                       "from turnos")[0]
-    assert hora == "19:00"
+    assert hora == "19:25"

@@ -280,13 +280,14 @@ local y no viajan por el repositorio. Cada push a `main` redespliega.
   valor previo registrado y no se puede reconstruir, salvo lo que ya quedó
   medido en [auditoria/README.md](auditoria/README.md). Las marcaciones
   anteriores a la migración son reconstruidas con lo que se sabe.
-- Las migraciones que limitan las correcciones, exigen motivo y bloquean los
-  meses cerrados están escritas y probadas, pero no aplicadas en producción al
-  2026-10-13. Hasta aplicarlas, un administrador sigue pudiendo reducir horas
-  sin tope ni segunda aprobación, como pasó en septiembre de 2026.
-- Varios valores de esas reglas son provisionales: el umbral de aprobación, la
-  duración máxima, quién aprueba y quién cierra meses. Los tiene que decidir
-  Recursos Humanos; la lista está en [migracion/README.md](migracion/README.md).
+- La fase A de las migraciones está aplicada en producción desde el
+  2026-10-13. La fase B, que obliga a corregir solo mediante ajustes y exige
+  motivo a toda escritura de un administrador, todavía no.
+- Una corrección que quita más de 10 minutos necesita la aprobación de otro
+  superadmin (V011, decidido el 2026-10-14). Siguen provisionales la duración
+  máxima, quién aprueba y quién cierra meses. Los deciden los
+  superadmins responsables del turnero; la lista está en
+  [migracion/README.md](migracion/README.md).
 - La identidad de quien hace cada cambio la pone la aplicación, a partir de
   usuarios y contraseñas en secrets. La base la registra, pero no la verifica.
 

@@ -2228,7 +2228,7 @@ def _dialogo_confirmar_edicion() -> None:
             if res["estado"] == "pendiente":
                 set_flash(
                     f"Corrección de {payload['nombre']} enviada a aprobación: quita "
-                    f"{-res['delta_extra']:.2f} h extra y necesita la firma de otro administrador."
+                    f"{_dec_a_hhmm(-res['delta_horas'])} y necesita la firma de otro administrador."
                 )
             else:
                 set_flash(f"Turno de {payload['nombre']} corregido · {_dec_a_hhmm(h)} trabajadas")
@@ -2250,9 +2250,10 @@ def _flujo_editar_turno(emp_corr, df: pd.DataFrame) -> None:
     st.caption(
         "Corrige un turno ya cerrado cuando el horario no corresponde. Solo se "
         "muestran turnos normales dentro de los filtros activos (las eventualidades "
-        "no se editan aquí). Lo que marcó el colaborador se conserva aparte. Si la "
-        "corrección quita horas extra por encima del umbral vigente, queda esperando "
-        "la aprobación de otro administrador."
+        "no se editan aquí). Lo que marcó el colaborador se conserva aparte. Para "
+        "cambiar solo el comentario, deja la fecha y la hora como están: el turno no "
+        "se mueve ni un segundo. Si la corrección quita más de 10 minutos, queda "
+        "esperando la aprobación de otro administrador."
     )
 
     if df is None or df.empty:
@@ -2381,8 +2382,9 @@ def _dialogo_confirmar_anulacion() -> None:
 
     st.warning(
         "El turno deja de contar, pero no se borra: queda anulado con tu usuario y "
-        "el motivo. Si tenía horas extra por encima del umbral vigente, la anulación "
-        "espera la aprobación de otro administrador."
+        "el motivo. Si es un turno de trabajo de más de 10 minutos, la anulación "
+        "espera la aprobación de otro administrador. Las eventualidades se anulan "
+        "en el acto."
     )
 
     def _fila(label: str, valor: str, color: str = BRAND_NAVY) -> str:

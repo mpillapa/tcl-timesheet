@@ -13,7 +13,7 @@
 -- -----------------------------
 -- Ningún periodo queda cerrado al migrar: cerrar es una acción explícita desde
 -- el panel. Cuándo se cierra cada mes, quién puede cerrarlo y quién puede
--- reabrirlo son decisiones de Recursos Humanos. El panel restringe ambas
+-- reabrirlo lo deciden los superadmins responsables. El panel restringe ambas
 -- acciones a los administradores con `gestiona_periodos = true` en secrets.
 
 

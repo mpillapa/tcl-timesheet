@@ -8,8 +8,8 @@ Tres secciones, cada una visible según un permiso en secrets
     ver_auditoria      ver la comparación entre lo marcado y lo vigente, y la
                        bitácora de cambios de supervisión
 
-Quién tiene cada permiso es una decisión de Recursos Humanos, no de la
-aplicación. Ver migracion/README.md.
+Quién tiene cada permiso lo deciden los superadmins responsables del turnero,
+no la aplicación. Ver migracion/README.md.
 
 Las reglas no viven aquí. Que quien solicita un ajuste no pueda aprobarlo, que
 un mes en curso no se pueda cerrar o que reabrir exija motivo lo impone la base
@@ -37,6 +37,22 @@ from core.data import (
 from core.employees import AREA_DE
 from core.time_utils import today_ecuador
 from core.ui_utils import bloquear_doble_click, set_flash
+
+# Nombres de las clases que devuelve clase_de_ajuste() (V011).
+CLASES_DE_AJUSTE = {
+    "anulacion": "Anulación",
+    "solo_comentario": "Solo comentario",
+    "menor": "Ajuste menor (10 min o menos)",
+    "suma": "Suma tiempo",
+    "recorte": "Recorte (más de 10 min)",
+}
+
+
+def _hhmm(horas: float) -> str:
+    """Horas decimales a 'H:MM', como el resto del panel."""
+    minutos = int(round(abs(horas) * 60))
+    return f"{'-' if horas < 0 else ''}{minutos // 60}:{minutos % 60:02d}"
+
 
 _MESES = ["", "enero", "febrero", "marzo", "abril", "mayo", "junio", "julio",
           "agosto", "septiembre", "octubre", "noviembre", "diciembre"]
@@ -84,8 +100,8 @@ def contar_pendientes_para(admin_user: str, areas_permitidas) -> int:
 def render_ajustes_pendientes(admin_user: str, areas_permitidas) -> None:
     st.markdown("#### Ajustes esperando aprobación")
     st.caption(
-        "Una corrección o anulación que quita horas extra por encima del umbral "
-        "vigente espera a que otro administrador la revise. Quien la solicita no "
+        "Una corrección que quita más de 10 minutos, o la anulación de un turno de "
+        "trabajo, espera a que otro administrador la revise. Quien la solicita no "
         "puede aprobarla."
     )
     df = _en_alcance(leer_ajustes("pendiente"), areas_permitidas)
@@ -124,7 +140,8 @@ def _tarjeta_ajuste(a, admin_user: str) -> None:
         st.markdown(f"**{titulo}**")
         st.write(detalle)
         c1, c2, c3 = st.columns(3)
-        c1.metric("Horas extra que se quitan", f"{-float(a['delta_extra']):.2f} h")
+        c1.metric("Tiempo que se quita", _hhmm(-float(a["delta_horas"])),
+                  help=f"De eso, {-float(a['delta_extra']):.2f} h son horas extra.")
         c2.metric("Solicitado por", a["solicitado_por"])
         c3.metric("Solicitado el", pd.Timestamp(a["solicitado_en"]).strftime("%d/%m %H:%M"))
         st.markdown(f"Motivo: _{a['motivo']}_")
@@ -247,11 +264,13 @@ def render_auditoria(areas_permitidas) -> None:
         st.caption("Sin ajustes en el periodo.")
     else:
         st.dataframe(
-            aj[["nombre", "fecha_turno", "tipo", "estado", "motivo", "solicitado_por",
-                "revisado_por", "delta_extra", "comentario_revision"]].rename(columns={
-                "nombre": "Funcionario", "fecha_turno": "Turno", "tipo": "Tipo", "estado": "Estado",
+            aj.assign(clase=aj["clase"].map(CLASES_DE_AJUSTE).fillna(aj["clase"]))[
+                ["nombre", "fecha_turno", "clase", "estado", "motivo", "solicitado_por",
+                 "revisado_por", "delta_horas", "delta_extra", "comentario_revision"]].rename(columns={
+                "nombre": "Funcionario", "fecha_turno": "Turno", "clase": "Cambio", "estado": "Estado",
                 "motivo": "Motivo", "solicitado_por": "Solicitó", "revisado_por": "Revisó",
-                "delta_extra": "Cambio en horas extra", "comentario_revision": "Comentario",
+                "delta_horas": "Cambio en horas", "delta_extra": "Cambio en horas extra",
+                "comentario_revision": "Comentario",
             }),
             hide_index=True, use_container_width=True,
         )

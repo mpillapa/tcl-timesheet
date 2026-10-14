@@ -494,8 +494,8 @@ def buscar_turno_abierto_idx(df: pd.DataFrame, nombre: str):
 # Ajustes: corrección y anulación con motivo y, si corresponde, aprobación
 # ---------------------------------------------------------------------------
 # La regla que decide si un ajuste necesita aprobación vive en la base
-# (V009, regla 'aprobacion_desde_recorte_extra_h'). Aquí no se replica: la
-# respuesta de la base dice si quedó aplicado o pendiente.
+# (V011, regla 'tolerancia_recorte_min'). Aquí no se replica: la respuesta de
+# la base dice si quedó aplicado o pendiente.
 
 def _id_por_entrada(conn, nombre: str, ts) -> int | None:
     return conn.execute(
@@ -507,6 +507,7 @@ def _id_por_entrada(conn, nombre: str, ts) -> int | None:
 def _resultado_ajuste(fila) -> dict:
     return {"id": fila["id"], "estado": fila["estado"],
             "requiere_aprobacion": bool(fila["requiere_aprobacion"]),
+            "delta_horas": float(fila["delta_horas"]),
             "delta_extra": float(fila["delta_extra"])}
 
 
@@ -515,7 +516,7 @@ def solicitar_correccion(nombre: str, ts_entrada_str: str, nueva_entrada: dateti
                          autor: str) -> dict | None:
     """Solicita corregir el horario de un turno cerrado.
 
-    Devuelve {'id', 'estado', 'requiere_aprobacion', 'delta_extra'}; estado es
+    Devuelve {'id', 'estado', 'requiere_aprobacion', 'delta_horas', 'delta_extra'}; estado es
     'aplicado' si la corrección se hizo en el acto o 'pendiente' si espera a
     otro administrador. None si el turno ya no existe. Levanta ReglaDeNegocio
     si la base la rechaza (motivo corto, periodo cerrado, duración imposible)."""
@@ -527,7 +528,7 @@ def solicitar_correccion(nombre: str, ts_entrada_str: str, nueva_entrada: dateti
         if tid is None:
             return None
         fila = conn.execute(
-            text("SELECT id, estado, requiere_aprobacion, delta_extra "
+            text("SELECT id, estado, requiere_aprobacion, delta_horas, delta_extra "
                  "FROM solicitar_correccion(:id, :e, :s, :o, :m, :u)"),
             {"id": tid, "e": nueva_entrada, "s": nueva_salida, "o": observacion,
              "m": motivo, "u": autor},
@@ -553,7 +554,7 @@ def solicitar_anulacion(nombre: str, ts_entrada_str: str, *, motivo: str, autor:
         if tid is None:
             return None
         fila = conn.execute(
-            text("SELECT id, estado, requiere_aprobacion, delta_extra "
+            text("SELECT id, estado, requiere_aprobacion, delta_horas, delta_extra "
                  "FROM solicitar_anulacion(:id, :m, :u)"),
             {"id": tid, "m": motivo, "u": autor},
         ).mappings().one()
@@ -592,7 +593,7 @@ SELECT a.id, t.nombre, t.area, t.fecha_turno, a.tipo, a.estado, a.motivo,
        {_HORA_JSON.format(c="a.propuesto ->> 'ts_entrada'")} AS entrada_propuesta,
        {_HORA_JSON.format(c="a.propuesto ->> 'ts_salida'")}  AS salida_propuesta,
        (a.antes ->> 'horas_trabajadas')::numeric AS horas_antes,
-       a.delta_horas, a.delta_extra, a.requiere_aprobacion,
+       a.delta_horas, a.delta_extra, a.requiere_aprobacion, clase_de_ajuste(a) AS clase,
        a.revisado_por, a.revisado_en AT TIME ZONE 'America/Guayaquil' AS revisado_en,
        a.comentario_revision
 FROM ajustes_turno a

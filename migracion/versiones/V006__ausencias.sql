@@ -9,9 +9,9 @@
 -- Por qué no se sacan de turnos
 -- -----------------------------
 -- Esos turnos suman horas efectivas en el comparativo contra horas esperadas
--- del panel. Moverlos a otra tabla obligaría a reescribir esos cálculos, y es
--- una decisión de Recursos Humanos si un permiso debe contar como horas. Así que
--- siguen en turnos, pero ahora:
+-- del panel. Moverlos a otra tabla obligaría a reescribir esos cálculos, y si un
+-- permiso debe contar como horas es una decisión de los superadmins, no de la
+-- base. Siguen en turnos, pero ahora:
 --
 --   - `evento` dice qué son, sin depender del texto;
 --   - `ausencia_id` los ata a la solicitud que los creó, con el rango completo,

@@ -8,8 +8,8 @@
 --
 -- La columna `estado` es la parte importante. 'vigente' significa que el valor
 -- ya regía en la aplicación antes de esta migración. 'provisional' significa
--- que lo propuso Tecnología para poder construir el mecanismo y que falta que
--- lo decida quien corresponda. La lista de pendientes está en
+-- que se eligió para poder construir el mecanismo y que falta que lo
+-- confirmen los superadmins responsables del turnero. La lista de pendientes está en
 -- migracion/README.md.
 --
 -- Los valores de 'vigente' tienen que coincidir con core/config.py. Lo
@@ -67,7 +67,7 @@ create table if not exists reglas_negocio (
 );
 
 comment on table reglas_negocio is
-    'Parámetros de negocio que usa la base. estado = provisional significa que falta la decisión de Recursos Humanos u Operaciones; ver migracion/README.md.';
+    'Parámetros de negocio que usa la base. estado = provisional significa que falta que lo confirmen los superadmins responsables; ver migracion/README.md.';
 
 -- on conflict do nothing: si alguien ya ajustó un valor en producción, volver
 -- a correr la migración no lo pisa.

@@ -1,7 +1,8 @@
 # Retención y acceso a los datos de auditoría
 
-Propuesta técnica para que Recursos Humanos y Legal decidan. Nada de lo que
-sigue está decidido salvo lo que se indica como ya implementado.
+Notas para los superadmins responsables del turnero, que es una herramienta
+interna de control. Nada de lo que sigue está decidido salvo lo que se indica
+como ya implementado.
 
 ## Qué datos se guardan
 
@@ -18,8 +19,10 @@ base guarda, además de los turnos:
 
 Son datos laborales de personas identificadas. Algunos subtipos de ausencia
 pueden revelar información de salud. La Ley Orgánica de Protección de Datos
-Personales del Ecuador aplica a su tratamiento; qué exige en concreto para este
-caso es una pregunta para Legal, no algo que se resuelva en el código.
+Personales del Ecuador aplica a su tratamiento aunque la herramienta sea de uso
+interno. Si en algún momento estos datos se usan fuera del control interno, por
+ejemplo en una sanción o en la nómina, conviene confirmar con quien corresponda
+qué exige la ley para ese uso.
 
 ## Lo que ya está implementado
 
@@ -55,8 +58,8 @@ reunir todo lo de una persona existen: sus turnos, sus marcaciones, los ajustes
 sobre sus turnos y los cambios de la bitácora. Falta el procedimiento: quién
 recibe la solicitud, en qué plazo y en qué formato se entrega.
 
-**Las ausencias por salud o maternidad.** Si Legal las considera datos
-sensibles, puede convenir guardar solo "Permiso" en el turno y dejar el subtipo
+**Las ausencias por salud o maternidad.** Si se consideran datos sensibles,
+puede convenir guardar solo "Permiso" en el turno y dejar el subtipo
 en `ausencias` con acceso más restringido.
 
 **Los respaldos manuales.** El procedimiento de despliegue recomienda un
