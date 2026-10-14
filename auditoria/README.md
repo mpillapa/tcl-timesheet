@@ -1,6 +1,6 @@
 # Auditoría de cambios en los turnos
 
-Cuatro scripts de solo lectura, más la bitácora que los vuelve casi
+Scripts de solo lectura, más la bitácora que los vuelve casi
 innecesarios. Ninguno imprime la cadena de conexión ni la contraseña, y los CSV
 que generan van a `auditoria/salida/`, carpeta ignorada por git porque contiene
 datos de personas.
@@ -11,7 +11,6 @@ datos de personas.
 | [analisis_mensual.py](analisis_mensual.py) | Cuántas horas extra perdió un mes de nómina. Es la lectura para la cifra de un mes completo |
 | [tablero_cambios.py](tablero_cambios.py) | Genera un HTML navegable para explorar turno por turno quién tocó qué horas |
 | [consultas_cambios.py](consultas_cambios.py) | Las consultas y la regla que decide qué cambio costó horas extra. Lo usa el tablero |
-| [verificar_bitacora.py](verificar_bitacora.py) | Retirado. Comprobaba la bitácora escribiendo en producción; lo reemplazan las pruebas de `pruebas/` |
 | [correcciones_por_admin.py](correcciones_por_admin.py) | Lee el rastro de texto en `Observaciones`. Cubre lo anterior a la bitácora |
 | [fuentes_de_auditoria.py](fuentes_de_auditoria.py) | Inventaría qué fuentes de auditoría hay en el servidor |
 | [comparar_con_sheets.py](comparar_con_sheets.py) | Reconstruye el antes y el después desde el historial de Drive. Ya sin uso futuro: el espejo está apagado |
@@ -73,15 +72,9 @@ Para leerla:
 .venv\Scripts\python.exe auditoria\bitacora.py --desde 2026-09-01
 ```
 
-Para comprobar que sigue registrando bien, por ejemplo después de tocar el
-esquema o de un cambio en la capa de datos:
-
-```powershell
-.venv\Scripts\python.exe auditoria\verificar_bitacora.py
-```
-
-Son 23 comprobaciones contra la base real, con un turno de prueba que se crea y
-se borra en la misma corrida. Pasaron todas al aplicar el esquema.
+Que sigue registrando bien lo comprueban las pruebas de `pruebas/`, contra un
+PostgreSQL local y no contra producción. Antes lo hacía
+`auditoria/verificar_bitacora.py` escribiendo en la base real; se retiró.
 
 ### Tres cosas que hay que tener presentes
 
@@ -324,7 +317,7 @@ Se comprobó contra el servidor el 2026-09-02, no por conjetura. Postgres 17.6.
 | Esquema `audit` | No existe | Los esquemas del proyecto son `public`, `auth`, `storage`, `realtime`, `graphql`, `vault`, `extensions` y `herramientas`. |
 | `pg_stat_statements` | Activo desde 2026-07-15 | Guarda la consulta normalizada (`SET ts_entrada = $1`), sin los valores. Sirve para contar ejecuciones, no para reconstruir nada. |
 | WAL y PITR | `archive_mode = on`, `wal_level = logical` | El WAL sí existe, pero no se consulta por SQL. PITR es add-on de plan y su ventana habitual es de 7 días, muy por detrás de las correcciones de junio a agosto. |
-| Respaldos locales de la migración | No hay | `migracion/migrar_sheets_a_supabase.py` lee del Sheet y escribe en Postgres sin dejar copia intermedia, y no queda ningún CSV ni XLSX del corte. |
+| Respaldos locales de la migración | No hay | `migracion/migrar_sheets_a_supabase.py`, ya retirado del repositorio, leía del Sheet y escribía en Postgres sin dejar copia intermedia, y no queda ningún CSV ni XLSX del corte. |
 
 Resumen: en la base no hay antes y después, y no hay forma de fabricarlo hacia
 atrás.
@@ -391,10 +384,11 @@ El segundo es un problema en curso. La última escritura del Sheet es del
 correcciones fechadas hasta el 2026-09-01. O el espejo está apagado en los
 secretos de Streamlit Cloud, que son independientes del `secrets.toml` local, o
 está fallando en silencio, porque `core.data._espejo` se traga los errores del
-respaldo a propósito para que no bloqueen una marcación. Conviene revisar el
-panel de errores del espejo en la vista de admin y el valor de
-`backup.espejo_sheets` en Streamlit Cloud. Mientras siga así, el respaldo no es
-respaldo y esta vía de auditoría tampoco cubre lo nuevo.
+respaldo a propósito para que no bloqueen una marcación. Mientras siga así, el
+respaldo no es respaldo y esta vía de auditoría tampoco cubre lo nuevo.
+
+Después del corte: el espejo está apagado, de modo que esta vía ya no cubre
+nada posterior al 2026-08-26. Lo nuevo lo cubre la bitácora.
 
 
 ## Resultado del corte del 2026-09-02

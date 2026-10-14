@@ -30,15 +30,16 @@ cédula) y ve una sola acción a la vez: si no tiene turno abierto, solo puede
 marcar entrada; si lo tiene, solo salida. Tras marcar, la sesión se cierra sola
 en unos segundos para que el siguiente use el quiosco.
 
-Super admin. Ingresa con usuario y contraseña. Tiene cinco pestañas:
+Super admin. Ingresa con usuario y contraseña. Tiene hasta seis pestañas:
 
 | Pestaña | Para qué sirve |
 |---|---|
 | Dashboard | Indicadores del período, horas por área, tendencia diaria, mapa de calor y progreso por funcionario contra la cuota |
 | Comparativo horas esperadas | Horas efectivas contra las esperadas, por mes y por funcionario, con el histórico completo |
 | Tabla | Detalle de los turnos filtrados, con descarga a CSV |
-| Gestión de turnos | Cierre de turnos en revisión, registro manual de entradas o turnos históricos, edición y eliminación |
+| Gestión de turnos | Cierre de turnos en revisión, registro manual de entradas o turnos históricos, edición y anulación |
 | Eventualidades | Registro de faltas justificadas, permisos y vacaciones por rango de fechas |
+| Ajustes y auditoría | Ajustes pendientes de aprobación, cierre y reapertura de periodos, y lo marcado contra lo vigente. La ven los admins que no son de solo lectura y, entre los de solo lectura, quien tiene `ver_auditoria` o `gestiona_periodos` |
 
 Cada admin ve solo las áreas que tiene asignadas en `AREAS_POR_ADMIN`
 (`views/super_admin.py`). Los usuarios marcados con `solo_lectura = true` en la
@@ -59,8 +60,10 @@ para el administrador. Pasar la primera capa no da acceso a los datos.
 
 ## Reglas de negocio
 
-Están todas en `core/config.py` y se aplican en `core/calculos.py` y
-`core/marcado.py`. Los valores vigentes son:
+La aplicación las toma de `core/config.py` y las aplica en `core/calculos.py`
+y `core/marcado.py`. Las que afectan a las horas las impone además la base,
+con los valores de la tabla `reglas_negocio` (ver más abajo), y
+`pruebas/test_reglas.py` comprueba que coinciden. Los valores vigentes son:
 
 | Regla | Valor | Dónde |
 |---|---|---|
@@ -200,17 +203,19 @@ con la variable `PG_BIN`.
 
 El esquema se define en migraciones numeradas, en
 [migracion/versiones/](migracion/versiones/), y se aplica con
-`migracion/aplicar_migraciones.py`. Al 2026-10-13 están escritas y probadas,
-pero todavía no aplicadas en producción: el orden de despliegue, en dos fases,
-está en [migracion/README.md](migracion/README.md).
+`migracion/aplicar_migraciones.py`, que lleva el registro en la tabla
+`schema_migraciones`. Qué falta aplicar en producción lo dice
+`aplicar_migraciones.py --desde-secrets --produccion --plan`, y el orden de
+despliegue, en dos fases, está en [migracion/README.md](migracion/README.md).
 
 Las tablas, una vez aplicadas:
 
 - `turnos`, el turno vigente, el que se paga. Un turno no se borra, se anula.
 - `marcaciones`, lo que se marcó en el reloj, en una tabla que no se puede
   editar. La diferencia con `turnos` es exactamente lo que se corrigió.
-- `ajustes_turno`, cada corrección y anulación con su motivo y, si quita 1 h
-  extra o más, la aprobación de otro administrador.
+- `ajustes_turno`, cada corrección y anulación con su motivo y, si quita más
+  de 10 minutos de tiempo trabajado, la aprobación de otro administrador
+  (regla `tolerancia_recorte_min`, V011).
 - `turnos_auditoria`, la bitácora: cada cambio con la fila antes y después, el
   autor, el origen y el motivo. De solo inserción. Existe desde el 2026-09-02,
   después de una auditoría que no pudo medir las horas modificadas porque la
@@ -250,8 +255,6 @@ local y no viajan por el repositorio. Cada push a `main` redespliega.
 
 ## Documentación relacionada
 
-- [MIGRACION_SUPABASE.md](MIGRACION_SUPABASE.md): paso a paso de la migración de
-  Google Sheets a Supabase.
 - [diagnostico/README.md](diagnostico/README.md): incidente de cuelgues del
   2026-08-25, causa, arreglo y uso del script de diagnóstico.
 - [seguridad/README.md](seguridad/README.md): RLS en el schema público, qué

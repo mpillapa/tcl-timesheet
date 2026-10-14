@@ -10,7 +10,6 @@ BRAND_NAVY = "#1E2D78"
 BRAND_NAVY_MID = "#3A4BA0"
 BRAND_NAVY_SOFT = "#8A96C9"
 BRAND_RED = "#D8202F"
-BRAND_RED_SOFT = "#F5C4C8"
 BRAND_VAC = "#2F9E8F"  # turquesa para horas de vacaciones
 BRAND_CUOTA = "#C77D00"  # ámbar/dorado para la línea de cuota (meta)
 BRAND_BG_SOFT = "#F4F6FC"

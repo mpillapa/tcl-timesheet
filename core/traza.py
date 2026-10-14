@@ -2,7 +2,7 @@
 
 Vive en su propio módulo porque es una regla de negocio, no una decisión de
 presentación: define cómo se lee y se escribe el historial visible de un turno,
-y la usan tanto el panel de admin como los scripts de auditoría.
+y la usa el panel de admin.
 
 El formato es:
 
@@ -29,8 +29,8 @@ vive en `turnos_auditoria` (ver migracion/auditoria_schema.sql), que es una
 fuente mejor que un campo de texto.
 
 Las filas históricas no se reescriben: ese texto anidado es la única traza que
-existe de esas correcciones anteriores a la bitácora. Para leerlas está
-`tags_de_correccion`, que devuelve todas y no solo la externa.
+existe de esas correcciones anteriores a la bitácora. Para leerlas todas, y no
+solo la externa, está auditoria/correcciones_por_admin.py.
 """
 
 import re
@@ -41,11 +41,6 @@ _MARCA_ORIG = "[Orig]:"
 # fila (Sheet migrado o app), y captura fecha y usuario.
 _RE_TAG = re.compile(r"\[Correcci\w*n\s+(\d{4}-\d{2}-\d{2})\s+por\s+([^\]]+)\]",
                      re.IGNORECASE)
-
-
-def tag_correccion(fecha_str: str, usuario: str) -> str:
-    """El tag que encabeza una observación corregida."""
-    return f"[Corrección {fecha_str} por {usuario}]"
 
 
 def observacion_del_colaborador(observaciones: str) -> str:
@@ -69,16 +64,3 @@ def observacion_del_colaborador(observaciones: str) -> str:
         return ""
     return texto
 
-
-def tags_de_correccion(observaciones: str) -> list:
-    """Todas las correcciones registradas en el texto, de la más reciente a la
-    más antigua: [(fecha, usuario), ...]. Devuelve más de una en las filas
-    históricas con tags anidados."""
-    return [(f, u.strip()) for f, u in _RE_TAG.findall(observaciones or "")]
-
-
-def fue_corregido_por(observaciones: str, usuario: str) -> bool:
-    """True si `usuario` aparece como autor de cualquiera de las correcciones,
-    no solo de la más externa."""
-    objetivo = (usuario or "").strip().casefold()
-    return any(u.casefold() == objetivo for _, u in tags_de_correccion(observaciones))

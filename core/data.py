@@ -40,7 +40,7 @@ from core import sheets_backup
 
 # Re-exports para mantener la API que ya importan marcado.py y las vistas.
 from core.calculos import calcular_horas, calcular_horas_efectivas, calcular_horas_extra  # noqa: F401
-from core.normalizacion import _normalizar_texto, _normalizar_cmp, _normalizar_serie  # noqa: F401
+from core.normalizacion import _normalizar_texto, _normalizar_cmp  # noqa: F401
 
 
 _COL_SQL = {
@@ -467,26 +467,14 @@ def archivar_historico(solo_un_mes: bool) -> dict:
 
 
 def buscar_turno_abierto_idx(df: pd.DataFrame, nombre: str):
-    """Índice del turno abierto del empleado, o None.
-
-    El fallback cubre las filas legacy con "Abierto" en Observaciones y Estado
-    vacío, que dejó un desalineo de columnas ya corregido."""
+    """Índice del turno abierto del empleado, o None."""
     if df.empty:
         return None
 
     nombre_norm = _normalizar_cmp(nombre)
     df_nombre = df["Nombre"].fillna("").map(_normalizar_cmp)
     estado = df["Estado"].fillna("").map(_normalizar_cmp)
-    obs = df["Observaciones"].fillna("").map(_normalizar_cmp)
-    nombre_mask = df_nombre == nombre_norm
-
-    primary = nombre_mask & (estado == "abierto")
-    idxs = df.index[primary].tolist()
-    if idxs:
-        return idxs[0]
-
-    legacy = nombre_mask & (obs == "abierto") & (estado == "")
-    idxs = df.index[legacy].tolist()
+    idxs = df.index[(df_nombre == nombre_norm) & (estado == "abierto")].tolist()
     return idxs[0] if idxs else None
 
 

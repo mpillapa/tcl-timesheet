@@ -437,7 +437,7 @@ def main() -> None:
         with eng.connect() as conn:
             if not tabla_existe(conn):
                 print("La tabla turnos_auditoria no existe todavía.\n"
-                      "Ejecuta migracion/auditoria_schema.sql en el SQL Editor de Supabase.")
+                      "Aplica las migraciones con migracion/aplicar_migraciones.py.")
                 return
 
             print(f"Analisis de cambios sobre los turnos de {etiqueta} "

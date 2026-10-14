@@ -18,8 +18,8 @@ Sin argumentos resume todo lo registrado. Con --csv deja el detalle en
 auditoria/salida/bitacora<sufijo>.csv, carpeta ignorada por git porque lleva
 datos de personas. No imprime la cadena de conexión ni la contraseña.
 
-Si la tabla todavía no existe, lo dice y sale: hay que ejecutar
-migracion/auditoria_schema.sql en el SQL Editor de Supabase.
+Si la tabla todavía no existe, lo dice y sale: hay que aplicar las
+migraciones con migracion/aplicar_migraciones.py.
 """
 
 import csv
@@ -202,7 +202,7 @@ def main() -> None:
         with eng.connect() as conn:
             if not tabla_existe(conn):
                 print("La tabla turnos_auditoria no existe todavía.\n"
-                      "Ejecuta migracion/auditoria_schema.sql en el SQL Editor de Supabase.")
+                      "Aplica las migraciones con migracion/aplicar_migraciones.py.")
                 return
             if usuario or desde:
                 print(f"Filtro: usuario={usuario or 'todos'}  desde={desde or 'el inicio'}")

@@ -1,3 +1,8 @@
+-- HISTÓRICO. Este archivo ya no se aplica: su contenido está en
+-- migracion/versiones/V000__linea_base.sql, y el esquema evoluciona con las
+-- migraciones de esa carpeta. Se conserva como registro de cómo se cerró la
+-- API REST el 2026-08-26.
+--
 -- Habilitar Row-Level Security en las tablas del schema public.
 --
 -- Sin RLS, cualquiera con la URL del proyecto y la clave anonima (que por

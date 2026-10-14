@@ -249,7 +249,7 @@ indicado, que se eligió para poder construir el mecanismo. Cambiarlas es un
 | Decisión | Valor provisional |
 |---|---|
 | Qué superadmins pueden aprobar ajustes | Nadie hasta que se configure `puede_aprobar` |
-| Qué superadmins cierran y reabren meses, y hasta qué día se cierra cada mes | Nadie hasta configurar `gestiona_periodos`; cierre manual |
+| Qué superadmins cierran y reabren meses, y hasta qué día se cierra cada mes | Nadie hasta configurar `gestiona_periodos`; cierre manual. Pendiente con la gerencia: [pendientes/cierre_de_mes.md](../pendientes/cierre_de_mes.md) |
 | Qué superadmins ven la auditoría | Nadie hasta configurar `ver_auditoria` |
 | Duración máxima de un turno | 24 h |
 | Largo mínimo del motivo | 10 caracteres |
@@ -292,8 +292,7 @@ El reporte del paso 3 también las lista.
 | [aplicar_migraciones.py](aplicar_migraciones.py) | Aplica las versiones pendientes en orden | Sí |
 | [validar_datos_existentes.py](validar_datos_existentes.py) | Lista turnos que las reglas nuevas no admitirían | No |
 | [sincronizar_empleados.py](sincronizar_empleados.py) | Padrón de secrets a `empleados`, sin PIN | Con `--aplicar` |
-| [schema.sql](schema.sql), [auditoria_schema.sql](auditoria_schema.sql) | El esquema anterior. Histórico: lo reemplaza V000 | No se usan |
-| [migrar_sheets_a_supabase.py](migrar_sheets_a_supabase.py) | La migración original desde Google Sheets | Histórico |
+| [schema.sql](schema.sql), [auditoria_schema.sql](auditoria_schema.sql) | El esquema anterior. Histórico: lo reemplaza V000. `pruebas/test_migraciones.py` los carga para simular la base anterior | No se aplican |
 
 ## Lo que esto no resuelve
 

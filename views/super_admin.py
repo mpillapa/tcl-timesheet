@@ -35,7 +35,7 @@ from core.config import (
 from core.normalizacion import _normalizar_cmp, _normalizar_serie
 from core.marcado import guardar_salida, barrer_turnos_olvidados
 from core.time_utils import (
-    now_ecuador, today_ecuador, parse_timestamp_flexible, parse_fecha_flexible, conservar_segundos,
+    now_ecuador, today_ecuador, parse_fecha_flexible, conservar_segundos,
 )
 from core.ui_utils import bloquear_doble_click, set_flash, mostrar_flash
 
@@ -43,7 +43,7 @@ from core.ui_utils import bloquear_doble_click, set_flash, mostrar_flash
 # Paleta de marca compartida con el marcador (única fuente: core/ui_theme).
 from core.ui_theme import (
     BRAND_NAVY, BRAND_NAVY_MID, BRAND_NAVY_SOFT,
-    BRAND_RED, BRAND_RED_SOFT, BRAND_VAC, BRAND_CUOTA,
+    BRAND_RED, BRAND_VAC, BRAND_CUOTA,
     BRAND_BG_SOFT, BRAND_TEXT, BRAND_MUTED,
     BRAND_CATEGORICAL, BRAND_EVENTO,
 )
@@ -64,15 +64,14 @@ SUBCATEGORIAS_EVENTO = [
 ]
 
 
-def _clasificar_obs(obs) -> str:
-    """Clasifica un turno por su observación: 'vacaciones', 'evento'
-    (falta/permiso) o 'trabajo' (turno normal)."""
-    o = str(obs or "").strip().lower()
-    if o.startswith(EVENTO_VACACIONES.lower()):
-        return "vacaciones"
-    if o.startswith(EVENTO_FALTA.lower()) or o.startswith(EVENTO_PERMISO.lower()):
-        return "evento"
-    return "trabajo"
+def _clase_de_turno(df: pd.DataFrame) -> pd.Series:
+    """'vacaciones', 'evento' (falta o permiso) o 'trabajo' (turno normal),
+    según la columna Evento. La llena la base al registrar la eventualidad
+    (V006), así que no depende de cómo empiece el texto de Observaciones."""
+    evento = df["Evento"].fillna("").astype(str).str.strip()
+    return evento.map(
+        lambda e: "trabajo" if not e else ("vacaciones" if e == EVENTO_VACACIONES else "evento")
+    )
 
 
 def _inject_brand_css() -> None:
@@ -1147,7 +1146,7 @@ def _render_dashboard(df: pd.DataFrame, df_prev: pd.DataFrame = None) -> None:
         "faltas/permisos en morado. Cuando el total supera la cuota del período, el exceso aparece en rojo."
     )
 
-    comp_tipo = completos.assign(_Clase=completos["Observaciones"].apply(_clasificar_obs))
+    comp_tipo = completos.assign(_Clase=_clase_de_turno(completos))
     piv = (
         comp_tipo.groupby(["Nombre", "_Clase"], dropna=True)["Horas Efectivas"]
         .sum()
@@ -1836,7 +1835,7 @@ def _guardar_registro_manual(modo: str, emp: str, payload: dict, admin_user: str
 
 
 def _render_correcciones(areas_permitidas=None, df_filt=None) -> None:
-    """Cierre de turnos en revisión, registro manual, edición y borrado.
+    """Cierre de turnos en revisión, registro manual, edición y anulación.
     `df_filt` son los registros ya filtrados del dashboard."""
     st.caption(
         "Úsalo cuando un empleado olvidó marcar entrada, salida o ambas. Todo cambio "
@@ -2262,7 +2261,7 @@ def _flujo_editar_turno(emp_corr, df: pd.DataFrame) -> None:
 
     nombre_col = df["Nombre"].fillna("").astype(str).str.strip()
     estado_col = df["Estado"].fillna("").astype(str).str.strip().str.casefold()
-    clase = df["Observaciones"].apply(_clasificar_obs)
+    clase = _clase_de_turno(df)
     mask = (nombre_col == str(emp_corr).strip()) & (estado_col == "completo") & (clase == "trabajo")
     cerrados = df[mask].copy().sort_values("Timestamp Entrada").reset_index(drop=True)
 
@@ -2463,7 +2462,7 @@ def _flujo_anular_turno(emp_corr, df: pd.DataFrame) -> None:
         st.info(f"{emp_corr} no tiene turnos dentro de los filtros activos.")
         return
 
-    st.caption(f"{len(cerrados)} turno(s) en los filtros activos. Selecciona la fila a eliminar.")
+    st.caption(f"{len(cerrados)} turno(s) en los filtros activos. Selecciona la fila a anular.")
 
     cols_disp = ["Fecha de Turno", "Timestamp Entrada", "Timestamp Salida",
                  "Horas Trabajadas", "Estado", "Observaciones"]
@@ -2488,7 +2487,7 @@ def _flujo_anular_turno(emp_corr, df: pd.DataFrame) -> None:
     turno = cerrados.iloc[sel_rows[0]]
     ts_ent_val = turno["Timestamp Entrada"]
     if pd.isna(ts_ent_val):
-        st.error("Este turno no tiene hora de entrada válida y no puede eliminarse desde aquí.")
+        st.error("Este turno no tiene hora de entrada válida y no puede anularse desde aquí.")
         return
     ts_ent_dt = pd.Timestamp(ts_ent_val).to_pydatetime()
     ts_sal_val = turno["Timestamp Salida"]

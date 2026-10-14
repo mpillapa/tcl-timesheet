@@ -68,8 +68,9 @@ def main() -> None:
     probar(con_puerto(url, 6543), "6543  pooler de TRANSACCION")
     print(
         "\nLectura del resultado:\n"
-        "  6543 OK y 5432 falla  -> es el fallo conocido del pooler de sesion.\n"
-        "                           La solucion es cambiar el puerto a 6543.\n"
+        "  6543 OK y 5432 falla  -> falla el pooler de sesion desde esta red.\n"
+        "                           No cambies el puerto sin leer diagnostico/README.md:\n"
+        "                           el 6543 no responde desde la red de la empresa.\n"
         "  los dos fallan        -> el problema no es el modo de conexion.\n"
         "                           Mira el mensaje: credenciales, red o proyecto pausado.\n"
         "  los dos OK            -> la conexion no es la causa del cuelgue.\n"

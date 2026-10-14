@@ -16,17 +16,6 @@ COLUMNAS = [
     "Observaciones",
 ]
 
-COLS_TEXTO = [
-    "Nombre",
-    "Area",
-    "Fecha de Turno",
-    "Timestamp Entrada",
-    "Timestamp Salida",
-    "Estado",
-    "Evento",
-    "Observaciones",
-]
-
 TS_FMT = "%Y-%m-%d %H:%M:%S"
 
 # Jornada base usada para calcular horas extra por turno.
@@ -45,8 +34,6 @@ UMBRAL_HORAS_EXTRA = 9.5
 MIN_JUSTIF_CHARS = 10
 
 MIN_MINUTOS_TURNO = 5
-
-WORKSHEET_HORAS_ESPERADAS = "Horas Esperadas"
 
 # Meses cerrados, para mantener liviana la hoja activa (Registros).
 WORKSHEET_HISTORICO = "Historico"

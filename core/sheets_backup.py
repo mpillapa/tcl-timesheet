@@ -1,13 +1,9 @@
 """Espejo de respaldo en Google Sheets.
 
 La base de datos es la fuente de verdad y el Sheet es copia de respaldo
-best-effort:
-
-  - Las funciones espejo_* replican cada escritura y lanzan las excepciones
-    hacia arriba; core.data las captura para que un fallo del respaldo nunca
-    bloquee una marcación.
-  - Las funciones leer_*_sheets leen el Sheet crudo. Las usa la migración
-    inicial y sirven para auditar el respaldo.
+best-effort. Las funciones espejo_* replican cada escritura y lanzan las
+excepciones hacia arriba; core.data las captura para que un fallo del
+respaldo nunca bloquee una marcación.
 
 El espejo se apaga con `espejo_sheets = false` en el bloque [backup] de secrets.
 
@@ -21,18 +17,10 @@ import queue
 import threading
 
 import gspread
-import pandas as pd
 import streamlit as st
 
-from core.config import (
-    COLUMNAS,
-    COLS_TEXTO,
-    WORKSHEET_NAME,
-    WORKSHEET_HORAS_ESPERADAS,
-    WORKSHEET_HISTORICO,
-)
-from core.calculos import calcular_horas_efectivas, calcular_horas_extra
-from core.normalizacion import _normalizar_texto, _normalizar_cmp, _normalizar_serie, _ts_key
+from core.config import COLUMNAS, WORKSHEET_NAME, WORKSHEET_HISTORICO
+from core.normalizacion import _normalizar_cmp, _ts_key
 from core.time_utils import now_ecuador, parse_fecha_flexible
 
 _SA_KEYS = {
@@ -152,93 +140,6 @@ def _asegurar_columnas_esquema() -> None:
         header = header + faltantes
     _header_cache = header  # reutilizado por _get_header (misma lectura)
     _esquema_asegurado = True
-
-
-# ---------------------------------------------------------------------------
-# Lecturas crudas (migración / auditoría)
-# ---------------------------------------------------------------------------
-def _valores_a_df(values) -> pd.DataFrame:
-    """Matriz cruda de get_all_values al DataFrame normalizado de la app, con las
-    columnas derivadas rellenadas en las filas legacy."""
-    if not values:
-        return pd.DataFrame({c: pd.Series(dtype=object) for c in COLUMNAS})
-
-    header = [_normalizar_texto(c) for c in values[0]]
-    rows = values[1:]
-    if rows:
-        ancho = len(header)
-        rows = [r[:ancho] + [""] * max(0, ancho - len(r)) for r in rows]
-        df = pd.DataFrame(rows, columns=header)
-        con_contenido = df.apply(lambda c: c.astype(str).str.strip(), axis=0).ne("").any(axis=1)
-        df = df[con_contenido]
-    else:
-        df = pd.DataFrame(columns=header)
-
-    for col in COLUMNAS:
-        if col not in df.columns:
-            df[col] = ""
-    df = df[COLUMNAS].copy()
-    df = df.astype(object)
-    for col in COLS_TEXTO:
-        df[col] = _normalizar_serie(df[col])
-
-    horas_num = pd.to_numeric(df["Horas Trabajadas"], errors="coerce")
-    horas_efect_num = pd.to_numeric(df["Horas Efectivas"], errors="coerce")
-    horas_extra_num = pd.to_numeric(df["Horas Extra"], errors="coerce")
-    mask_falta_efect = horas_num.notna() & horas_efect_num.isna()
-    if mask_falta_efect.any():
-        df.loc[mask_falta_efect, "Horas Efectivas"] = horas_num[mask_falta_efect].apply(calcular_horas_efectivas)
-    mask_falta_extra = horas_num.notna() & horas_extra_num.isna()
-    if mask_falta_extra.any():
-        df.loc[mask_falta_extra, "Horas Extra"] = horas_num[mask_falta_extra].apply(calcular_horas_extra)
-    return df
-
-
-def leer_registros_sheets() -> pd.DataFrame:
-    """Hoja Registros completa, normalizada. Sin caché."""
-    return _valores_a_df(_get_worksheet().get_all_values())
-
-
-def leer_historico_sheets() -> pd.DataFrame:
-    """Hoja Historico completa, normalizada. Vacío si no existe."""
-    sh = _get_worksheet().spreadsheet
-    try:
-        hist = sh.worksheet(WORKSHEET_HISTORICO)
-    except gspread.WorksheetNotFound:
-        return pd.DataFrame({c: pd.Series(dtype=object) for c in COLUMNAS})
-    return _valores_a_df(hist.get_all_values())
-
-
-def leer_horas_esperadas_sheets() -> pd.DataFrame:
-    """Hoja 'Horas Esperadas' cruda -> DataFrame [Año, Mes, Horas].
-    Vacío si la hoja no existe o no tiene filas válidas."""
-    meses_num = {
-        "enero": 1, "febrero": 2, "marzo": 3, "abril": 4,
-        "mayo": 5, "junio": 6, "julio": 7, "agosto": 8,
-        "septiembre": 9, "octubre": 10, "noviembre": 11, "diciembre": 12,
-    }
-    sh = _get_worksheet().spreadsheet
-    try:
-        ws = sh.worksheet(WORKSHEET_HORAS_ESPERADAS)
-    except gspread.WorksheetNotFound:
-        return pd.DataFrame(columns=["Año", "Mes", "Horas"])
-    values = ws.get_all_values()
-    if len(values) < 2:
-        return pd.DataFrame(columns=["Año", "Mes", "Horas"])
-
-    header = [_normalizar_texto(c).lower() for c in values[0]]
-    df = pd.DataFrame(values[1:], columns=header)
-
-    df["Año"] = pd.to_numeric(df.get("año", pd.Series(dtype=object)), errors="coerce")
-    df["Mes"] = df.get("mes", pd.Series(dtype=object)).astype(str).str.strip().str.lower().map(meses_num)
-    horas_raw = df.get("horas", pd.Series(dtype=object)).astype(str).str.strip()
-    horas_raw = horas_raw.str.replace(",", ".", regex=False).replace("", pd.NA)
-    df["Horas"] = pd.to_numeric(horas_raw, errors="coerce")
-
-    df = df.dropna(subset=["Año", "Mes", "Horas"])
-    df["Año"] = df["Año"].astype(int)
-    df["Mes"] = df["Mes"].astype(int)
-    return df[["Año", "Mes", "Horas"]].reset_index(drop=True)
 
 
 # ---------------------------------------------------------------------------

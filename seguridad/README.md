@@ -3,7 +3,8 @@
 ## RLS en el schema `public`
 
 El advisor de Supabase reporta `rls_disabled_in_public` sobre `turnos` y
-`horas_esperadas`. El script [`habilitar_rls.sql`](habilitar_rls.sql) lo corrige.
+`horas_esperadas`. El script [`habilitar_rls.sql`](habilitar_rls.sql) lo corrigio
+el 2026-08-26; hoy lo mismo esta en `migracion/versiones/V000__linea_base.sql`.
 
 ### Que expone el problema
 
@@ -18,10 +19,11 @@ todo, sin pasar por la autenticacion de la aplicacion.
 ### Por que habilitarlo no rompe la aplicacion
 
 La aplicacion no toca la API REST. Conecta por Postgres directo con SQLAlchemy
-a traves del pooler (ver [`core/db.py`](../core/db.py)) usando el rol
-`postgres`, que en Supabase tiene el atributo `BYPASSRLS`: las politicas de RLS
-no se le evaluan. RLS solo condiciona a los roles `anon` y `authenticated`, que
-esta aplicacion nunca usa.
+a traves del pooler (ver [`core/db.py`](../core/db.py)). Desde la migracion
+V010 usa el rol `turnero_app`, que no tiene `BYPASSRLS` y entra por su propia
+politica, `turnero_app_acceso`. Con el rol anterior, `postgres`, entraba porque
+en Supabase tiene `BYPASSRLS`. RLS sin politicas solo deja fuera a `anon` y
+`authenticated`, que esta aplicacion nunca usa.
 
 Consecuencia practica: habilitar RLS sin escribir ninguna politica cierra la
 puerta de la API y deja la aplicacion intacta.
