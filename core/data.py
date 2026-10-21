@@ -15,8 +15,9 @@ Desde las migraciones de migracion/versiones/
 ---------------------------------------------
 - Un turno no se borra: se anula, y los anulados no aparecen en las lecturas.
 - Corregir el horario de un turno cerrado o anularlo es un ajuste
-  (solicitar_correccion, solicitar_anulacion). Los grandes esperan la
-  aprobación de otro administrador.
+  (solicitar_correccion, solicitar_anulacion), con motivo. Desde V012 se aplica
+  en el acto: no espera la aprobación de otro administrador, pero queda
+  registrado en `ajustes_turno` y en la bitácora.
 - La base calcula las horas y valida cada turno. Si rechaza algo por una regla
   de negocio, aquí se convierte en ReglaDeNegocio con un mensaje para el
   usuario; quien llama decide cómo mostrarlo.
@@ -429,8 +430,7 @@ def archivar_historico(solo_un_mes: bool) -> dict:
     mes calendario, no archiva y devuelve bloqueado=True (el backlog inicial se
     resuelve a mano). Devuelve {'archivadas', 'bloqueado', 'meses'}.
 
-    Archivar no es cerrar el periodo: solo separa el histórico en el panel.
-    Cerrar un mes, para que no admita más cambios, es cerrar_periodo."""
+    Archivar no impide cambios: solo separa el histórico en el panel."""
     inicio_mes = now_ecuador().date().replace(day=1)
     try:
         with get_engine().connect() as conn:
@@ -479,11 +479,11 @@ def buscar_turno_abierto_idx(df: pd.DataFrame, nombre: str):
 
 
 # ---------------------------------------------------------------------------
-# Ajustes: corrección y anulación con motivo y, si corresponde, aprobación
+# Ajustes: corrección y anulación con motivo, registradas en ajustes_turno
 # ---------------------------------------------------------------------------
-# La regla que decide si un ajuste necesita aprobación vive en la base
-# (V011, regla 'tolerancia_recorte_min'). Aquí no se replica: la respuesta de
-# la base dice si quedó aplicado o pendiente.
+# Si un ajuste espera aprobación lo decide la base (V012, regla
+# 'exigir_aprobacion_ajustes', hoy en 0: todo se aplica en el acto). Aquí no
+# se replica: la respuesta de la base dice si quedó aplicado o pendiente.
 
 def _id_por_entrada(conn, nombre: str, ts) -> int | None:
     return conn.execute(
@@ -505,9 +505,10 @@ def solicitar_correccion(nombre: str, ts_entrada_str: str, nueva_entrada: dateti
     """Solicita corregir el horario de un turno cerrado.
 
     Devuelve {'id', 'estado', 'requiere_aprobacion', 'delta_horas', 'delta_extra'}; estado es
-    'aplicado' si la corrección se hizo en el acto o 'pendiente' si espera a
-    otro administrador. None si el turno ya no existe. Levanta ReglaDeNegocio
-    si la base la rechaza (motivo corto, periodo cerrado, duración imposible)."""
+    'aplicado', salvo que alguien vuelva a encender la aprobación en la base,
+    en cuyo caso puede quedar 'pendiente'. None si el turno ya no existe.
+    Levanta ReglaDeNegocio si la base la rechaza (motivo corto, duración
+    imposible, turno cruzado con otro)."""
     ts = _a_ts(ts_entrada_str)
     if ts is None:
         return None
@@ -522,6 +523,7 @@ def solicitar_correccion(nombre: str, ts_entrada_str: str, nueva_entrada: dateti
              "m": motivo, "u": autor},
         ).mappings().one()
     resultado = _resultado_ajuste(fila)
+    _limpiar_caches_de_auditoria()
     if resultado["estado"] == "aplicado":
         _limpiar_caches()
         _espejo(sheets_backup.espejo_actualizar, nombre, ts_entrada_str, {
@@ -547,25 +549,19 @@ def solicitar_anulacion(nombre: str, ts_entrada_str: str, *, motivo: str, autor:
             {"id": tid, "m": motivo, "u": autor},
         ).mappings().one()
     resultado = _resultado_ajuste(fila)
+    _limpiar_caches_de_auditoria()
     if resultado["estado"] == "aplicado":
         _limpiar_caches()
         _espejo(sheets_backup.espejo_eliminar, nombre, ts_entrada_str)
     return resultado
 
 
-def aprobar_ajuste(ajuste_id: int, *, usuario: str, comentario: str = "") -> None:
-    with _traducir_errores(), get_engine().begin() as conn:
-        conn.execute(text("SELECT aprobar_ajuste(:id, :u, :c)"),
-                     {"id": int(ajuste_id), "u": usuario, "c": comentario})
-    _limpiar_caches()
+def _limpiar_caches_de_auditoria() -> None:
+    """Para que la tabla de modificaciones muestre el cambio en el acto y no
+    al vencer la caché de 60 s."""
     leer_ajustes.clear()
-
-
-def rechazar_ajuste(ajuste_id: int, *, usuario: str, comentario: str) -> None:
-    with _traducir_errores(), get_engine().begin() as conn:
-        conn.execute(text("SELECT rechazar_ajuste(:id, :u, :c)"),
-                     {"id": int(ajuste_id), "u": usuario, "c": comentario})
-    leer_ajustes.clear()
+    leer_diferencias_marcacion.clear()
+    leer_bitacora_supervision.clear()
 
 
 # Los horarios de `antes` y `propuesto` son texto dentro de un jsonb. El de
@@ -601,46 +597,6 @@ def leer_ajustes(estado: str = "", desde: date | None = None) -> pd.DataFrame:
     with get_engine().connect() as conn:
         rows = conn.execute(text(_SELECT_AJUSTES), {"estado": estado, "desde": desde}).mappings().all()
     return pd.DataFrame([dict(r) for r in rows])
-
-
-# ---------------------------------------------------------------------------
-# Periodos de nómina
-# ---------------------------------------------------------------------------
-@st.cache_data(ttl=60)
-def leer_periodos() -> pd.DataFrame:
-    """Un renglón por cada mes con turnos, con su estado de cierre y el último
-    movimiento. Un mes sin fila en periodos_nomina está abierto."""
-    sql = """
-    WITH meses AS (
-        SELECT DISTINCT extract(year from fecha_turno)::int AS anio,
-                        extract(month from fecha_turno)::int AS mes
-        FROM turnos WHERE NOT anulado
-    )
-    SELECT m.anio, m.mes, coalesce(p.estado, 'abierto') AS estado,
-           p.cambiado_por, p.cambiado_en AT TIME ZONE 'America/Guayaquil' AS cambiado_en,
-           (SELECT count(*) FROM periodos_eventos e
-             WHERE e.anio = m.anio AND e.mes = m.mes AND e.accion = 'reapertura') AS reaperturas
-    FROM meses m
-    LEFT JOIN periodos_nomina p ON p.anio = m.anio AND p.mes = m.mes
-    ORDER BY m.anio DESC, m.mes DESC
-    """
-    with get_engine().connect() as conn:
-        rows = conn.execute(text(sql)).mappings().all()
-    return pd.DataFrame([dict(r) for r in rows])
-
-
-def cerrar_periodo(anio: int, mes: int, *, usuario: str, motivo: str = "") -> None:
-    with _traducir_errores(), get_engine().begin() as conn:
-        conn.execute(text("SELECT cerrar_periodo(:a, :m, :u, :mot)"),
-                     {"a": int(anio), "m": int(mes), "u": usuario, "mot": motivo})
-    leer_periodos.clear()
-
-
-def reabrir_periodo(anio: int, mes: int, *, usuario: str, motivo: str) -> None:
-    with _traducir_errores(), get_engine().begin() as conn:
-        conn.execute(text("SELECT reabrir_periodo(:a, :m, :u, :mot)"),
-                     {"a": int(anio), "m": int(mes), "u": usuario, "mot": motivo})
-    leer_periodos.clear()
 
 
 # ---------------------------------------------------------------------------

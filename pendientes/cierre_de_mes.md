@@ -1,7 +1,13 @@
 # Cierre de mes en el turnero
 
-Tema pendiente, con prioridad alta. Hay que acordarlo con la gerencia y los
-jefes de área antes de activar el cierre de mes. Registrado el 2026-10-14.
+Resuelto el 2026-10-21: la gerencia y el jefe de carga decidieron no bloquear
+cambios por cierre de mes ni pedir aprobación para corregir. El control se hace
+después, sobre el registro de modificaciones. V012 apaga el bloqueo y el panel
+ya no ofrece cerrar meses; ver
+[migracion/README.md](../migracion/README.md#despliegue-de-v012).
+
+Lo que sigue es la propuesta tal como se registró el 2026-10-14, para tener el
+contexto si el tema vuelve.
 
 ## Por qué hace falta
 

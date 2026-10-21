@@ -115,3 +115,25 @@ def test_fase_a_sobre_una_base_como_la_de_produccion(servidor):
 
     with servidor.cursor() as cur:
         cur.execute(f"drop database {nombre} with (force)")
+
+
+def test_v012_aplica_los_ajustes_que_encuentra_pendientes(servidor, base_a):
+    # Producción antes de V012: la aprobación encendida y un recorte esperando.
+    from conftest import insertar_turno
+    base_a.uno("update reglas_negocio set valor = 1 where clave = 'exigir_aprobacion_ajustes' returning 1")
+    tid = insertar_turno(base_a, entrada="2026-09-10 08:00:00", salida="2026-09-10 19:30:00")
+    with base_a.cursor("turnero_app") as cur:
+        cur.execute("select id, estado from solicitar_correccion(%s, '2026-09-10 08:00', '2026-09-10 17:00', "
+                    "null, 'Cierre de vuelo confirmado con operaciones', 'admin_a')", (tid,))
+        aid, estado = cur.fetchone()
+    assert estado == "pendiente"
+    # Se vuelve a correr el archivo de V012 tal cual, como lo hará el ejecutor
+    # en producción. La regla ya existe, así que se deja como la dejaría V012.
+    base_a.uno("update reglas_negocio set valor = 0 where clave = 'exigir_aprobacion_ajustes' returning 1")
+    base_a.uno("delete from schema_migraciones where version = 'V012' returning 1")
+    res = aplicar_migraciones(servidor, base_a.nombre, "A")
+    assert res.returncode == 0, res.stdout + res.stderr
+
+    assert base_a.uno("select estado, revisado_por from ajustes_turno where id = %s", (aid,)) == (
+        "aplicado", "sistema: V012")
+    assert float(base_a.uno("select horas_extra from turnos where id = %s", (tid,))[0]) == 0.0

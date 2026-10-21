@@ -1,8 +1,8 @@
 """La capa de datos de la aplicación (core/data.py) contra la base migrada.
 
 Conecta como `turnero_app`, que es como quedará la aplicación en producción, y
-recorre los flujos reales: el colaborador marca, un administrador corrige,
-otro aprueba, se anula, se registra un permiso, se cierra un mes.
+recorre los flujos reales: el colaborador marca, un administrador corrige y
+el cambio se aplica en el acto, se anula, se registra un permiso.
 """
 
 from datetime import datetime
@@ -42,21 +42,23 @@ def test_la_jornada_del_colaborador(datos, base_b):
     assert base_b.uno("select count(*) from marcaciones where origen = 'colaborador'")[0] == 2
 
 
-def test_un_recorte_grande_espera_y_otro_lo_aprueba(datos):
+def test_un_recorte_grande_se_aplica_y_aparece_en_las_modificaciones(datos):
     _marca_y_cierra(datos)
+    # Se lee antes para llenar la caché: la corrección tiene que limpiarla.
+    assert datos.leer_ajustes("", datetime(2026, 1, 1).date()).empty
     res = datos.solicitar_correccion(
         "Prueba Uno", "2026-09-10 08:00:13", datetime(2026, 9, 10, 8, 0, 13), datetime(2026, 9, 10, 17, 0),
         "[Corrección por admin_a]: " + MOTIVO, motivo=MOTIVO, autor="admin_a")
-    assert res["estado"] == "pendiente" and res["delta_extra"] == pytest.approx(-2.51)
-    assert datos.leer_registros().iloc[0]["Horas Extra"] == pytest.approx(2.51)
-
-    pend = datos.leer_ajustes("pendiente")
-    assert list(pend[["entrada_antes", "salida_propuesta"]].iloc[0]) == ["2026-09-10 08:00", "2026-09-10 17:00"]
-
-    with pytest.raises(datos.ReglaDeNegocio, match="no puede aprobarlo"):
-        datos.aprobar_ajuste(res["id"], usuario="admin_a")
-    datos.aprobar_ajuste(res["id"], usuario="admin_b", comentario="Revisado con el manifiesto")
+    assert res["estado"] == "aplicado" and res["delta_extra"] == pytest.approx(-2.51)
     assert datos.leer_registros().iloc[0]["Horas Extra"] == pytest.approx(0)
+
+    aj = datos.leer_ajustes("", datetime(2026, 1, 1).date())
+    assert len(aj) == 1
+    fila = aj.iloc[0]
+    assert [fila["entrada_antes"], fila["salida_antes"], fila["salida_propuesta"]] == [
+        "2026-09-10 08:00", "2026-09-10 19:30", "2026-09-10 17:00"]
+    assert (fila["estado"], fila["clase"], fila["solicitado_por"], fila["motivo"]) == (
+        "aplicado", "recorte", "admin_a", MOTIVO)
 
     dif = datos.leer_diferencias_marcacion(datetime(2026, 9, 1).date())
     assert len(dif) == 1
@@ -71,8 +73,7 @@ def test_una_correccion_sin_motivo_suficiente_se_rechaza_con_mensaje(datos):
 
 
 def test_anular_saca_el_turno_de_las_lecturas_y_queda_en_la_bitacora(datos):
-    # Un turno de cinco minutos: más largo, la anulación esperaría aprobación.
-    _marca_y_cierra(datos, salida="2026-09-10 08:05:00")
+    _marca_y_cierra(datos)
     res = datos.solicitar_anulacion("Prueba Uno", "2026-09-10 08:00:13", motivo=MOTIVO, autor="admin_a")
     assert res["estado"] == "aplicado"
     assert datos.leer_registros().empty
@@ -102,18 +103,18 @@ def test_un_permiso_queda_atado_a_su_solicitud(datos, base_b):
                                  origen=datos.ORIGEN_COLABORADOR)
 
 
-def test_un_mes_cerrado_rechaza_el_cambio_con_mensaje_claro(datos, base_b):
+def test_una_regla_de_la_base_llega_como_mensaje_claro(datos, base_b):
+    # El bloqueo de meses cerrados está apagado desde V012; se enciende aquí
+    # solo para tener un rechazo de la base que traducir.
+    base_b.uno("update reglas_negocio set valor = 1 where clave = 'bloquear_periodos_cerrados' returning 1")
     anio, mes = mes_pasado_cerrable(base_b)
     entrada = f"{anio}-{mes:02d}-10 08:00:00"
     insertar_turno(base_b, entrada=entrada)
-    datos.cerrar_periodo(anio, mes, usuario="admin_rrhh", motivo="Nómina enviada")
-    assert datos.leer_periodos().query("anio == @anio and mes == @mes").iloc[0]["estado"] == "cerrado"
+    with base_b.cursor("turnero_app") as cur:
+        cur.execute("select cerrar_periodo(%s, %s, 'admin_rrhh', 'Nómina enviada')", (anio, mes))
     with pytest.raises(datos.ReglaDeNegocio, match=f"{anio}-{mes:02d} está cerrado"):
         datos.actualizar_por_entrada("Prueba Uno", entrada, {"Estado": "Revision"},
                                      autor="Prueba Uno", origen=datos.ORIGEN_COLABORADOR)
-    with pytest.raises(datos.ReglaDeNegocio, match="exige un motivo"):
-        datos.reabrir_periodo(anio, mes, usuario="admin_rrhh", motivo="tarde")
-    datos.reabrir_periodo(anio, mes, usuario="admin_rrhh", motivo="Corrección reportada por el jefe de área")
 
 
 def test_conservar_segundos():

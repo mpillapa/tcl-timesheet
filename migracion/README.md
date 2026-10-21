@@ -17,15 +17,15 @@ productivo aprobado por Tecnología. La última sección dice qué falta para es
 | La aplicación conecta como `postgres`, dueño de todo | Conecta como `turnero_app`, que no puede borrar, ni tocar la bitácora, ni ver el esquema `herramientas` de la otra aplicación del proyecto |
 | Eliminar un turno es un `DELETE` | Se anula: queda con quién, cuándo y por qué |
 | Las horas son columnas que cualquiera escribe | La base las calcula desde el horario |
-| Corregir es sobrescribir la fila | Es un ajuste con motivo; si quita 1 h extra o más, lo aprueba otra persona |
+| Corregir es sobrescribir la fila | Es un ajuste con motivo, que guarda el antes y lo que se cambió. Se aplica en el acto (V012) |
 | La marcación del colaborador se pierde al corregir | Se guarda aparte, en una tabla que no se puede editar |
 | La bitácora se puede borrar | Es de solo inserción, también para su dueño |
-| `archivado` no impide nada | Un mes cerrado rechaza cambios; reabrirlo queda registrado |
+| `archivado` no impide nada | Sigue sin impedir nada. El cierre de V007 existe, pero V012 lo deja apagado |
 | La persona es su nombre | Tiene un identificador en `empleados` |
 | Un permiso se reconoce por el texto de la observación | Tiene tipo y está atado a su solicitud en `ausencias` |
 | Las horas se guardan sin zona | Se guardan como instante (`timestamptz`) |
 | Los umbrales viven solo en el código | Están en `reglas_negocio`, con su estado de decisión |
-| Esquema pegado a mano, sin pruebas | Migraciones numeradas y 72 pruebas contra una base local |
+| Esquema pegado a mano, sin pruebas | Migraciones numeradas y 100 pruebas contra una base local |
 
 ### Las tablas
 
@@ -33,9 +33,9 @@ productivo aprobado por Tecnología. La última sección dice qué falta para es
 |---|---|---|
 | `turnos` | El turno vigente, el que se paga | La aplicación, con las validaciones de la base |
 | `marcaciones` | Lo que se marcó en el reloj, una vez por turno | Un trigger. Solo inserción |
-| `ajustes_turno` | Cada corrección y anulación, con motivo, antes, propuesta y revisión | Las funciones `solicitar_*`, `aprobar_ajuste`, `rechazar_ajuste` |
+| `ajustes_turno` | Cada corrección y anulación, con motivo, antes y lo que se cambió | Las funciones `solicitar_*`. `aprobar_ajuste` y `rechazar_ajuste` siguen en la base, sin uso desde V012 |
 | `turnos_auditoria` | Toda modificación de un turno, con autor, origen, motivo y ajuste | Un trigger. Solo inserción |
-| `periodos_nomina`, `periodos_eventos` | Estado de cada mes y cada cierre o reapertura | `cerrar_periodo`, `reabrir_periodo`. Los eventos son solo inserción |
+| `periodos_nomina`, `periodos_eventos` | Estado de cada mes y cada cierre o reapertura. Sin uso desde V012 | `cerrar_periodo`, `reabrir_periodo`. Los eventos son solo inserción |
 | `empleados` | Identidad de cada persona: nombre y área, sin PIN | Un trigger y `sincronizar_empleados.py` |
 | `ausencias` | La solicitud de un permiso, falta o vacaciones | El panel, en Eventualidades |
 | `reglas_negocio` | Jornada, umbrales y banderas | Nadie desde la aplicación; se cambia con un `update` a mano |
@@ -56,6 +56,8 @@ productivo aprobado por Tecnología. La última sección dice qué falta para es
 | [V009](versiones/V009__ajustes_con_aprobacion.sql) | A | Ajustes con motivo y aprobación |
 | [V010](versiones/V010__rol_de_la_aplicacion.sql) | A | El rol `turnero_app`, sin contraseña |
 | [V011](versiones/V011__tolerancia_de_recorte.sql) | A | La aprobación se mide en minutos quitados, con 10 min de tolerancia |
+| [V012](versiones/V012__sin_aprobacion_ni_cierre.sql) | A | Los ajustes se aplican en el acto y un mes cerrado no bloquea; aplica los pendientes |
+| [V013](versiones/V013__evento_de_jornada.sql) | A | El evento de un turno trabajado según su duración: sin novedad, con tolerancia o vacío |
 | [V101](versiones/V101__exigir_ajustes_y_motivo.sql) | B | Enciende la obligación de ajuste y de motivo |
 | [V102](versiones/V102__horarios_con_zona.sql) | B | Entrada y salida a `timestamptz` |
 
@@ -174,8 +176,8 @@ Con el commit y el push del código nuevo, Streamlit Cloud redespliega solo. En
 los secrets de Streamlit Cloud, que son independientes del archivo local:
 
 1. cambiar `[connections.supabase] url` a la de `turnero_app`;
-2. añadir los permisos `puede_aprobar`, `gestiona_periodos` y `ver_auditoria`
-   a quien corresponda (ver decisiones pendientes).
+2. añadir `ver_auditoria = true` a quien deba ver la pestaña "Modificaciones
+   de turnos". `puede_aprobar` y `gestiona_periodos` ya no se usan desde V012.
 
 El código nuevo funciona con cualquiera de las dos URL, así que el orden entre
 el push y el cambio de secrets no importa.
@@ -195,10 +197,10 @@ abierta conserve el tipo viejo de las columnas.
 ### Paso 9. Comprobar
 
 - Un colaborador marca entrada y salida en el quiosco.
-- Un administrador corrige un turno quitando menos de 1 h extra: se aplica solo.
-- Otro corrige quitando más: queda esperando, y un tercero con
-  `puede_aprobar` lo ve en "Ajustes y auditoría" y lo aprueba.
-- La sección "Lo que se marcó contra lo que quedó" muestra esa corrección.
+- Un administrador corrige un turno quitando más de 10 minutos: se aplica en
+  el acto.
+- Quien tiene `ver_auditoria` la ve en "Modificaciones de turnos", con el
+  horario de antes y el de después, y en "Lo que se marcó contra lo que quedó".
 - El análisis de septiembre da las mismas cifras que antes:
   `.venv\Scripts\python.exe auditoria\analisis_mensual.py --mes 2026-09`.
 
@@ -238,6 +240,57 @@ que llegó después y se despliega en este orden:
 Los ajustes que ya estaban pendientes siguen pendientes: la regla nueva se
 aplica a lo que se solicite desde ese momento.
 
+## Despliegue de V012 y V013
+
+Las dos son de fase A y no cambian ninguna firma: el código que está hoy en
+producción sigue funcionando con ellas. Se aplican juntas. El orden:
+
+1. Respaldo, como en el paso 2.
+2. Ver si hay ajustes esperando, porque V012 los aplica (solo lectura):
+
+   ```sql
+   select a.id, t.nombre, t.fecha_turno, a.tipo, a.solicitado_por, a.motivo
+   from ajustes_turno a join turnos t on t.id = a.turno_id
+   where a.estado = 'pendiente' order by a.solicitado_en;
+   ```
+
+3. `aplicar_migraciones.py --desde-secrets --produccion --plan`: tienen que
+   aparecer V012 y V013, y V011 si todavía no se aplicó.
+4. `aplicar_migraciones.py --desde-secrets --produccion`. Al terminar, el
+   aviso de V012 dice cuántos pendientes aplicó y cuántos cerró sin aplicar.
+5. Push del código. El panel nuevo ya no tiene la pantalla de aprobación ni la
+   de cierre de mes, y cuenta los turnos con evento de jornada como trabajo.
+   Con V013 aplicada y el código viejo, esos turnos se verían un rato como
+   eventualidades en el dashboard; por eso conviene hacer el push enseguida.
+
+Desde V013, al cerrarse un turno de trabajo la base llena `evento`:
+
+| Duración | Evento |
+|---|---|
+| Hasta 9 h | Turno completo sin novedad |
+| Más de 9 h y hasta 9 h 30 | Turno completo con tolerancia de horas extra |
+| Más de 9 h 30 | Vacío: lleva la justificación del colaborador |
+
+Es una etiqueta: las horas extra se calculan igual. Se recalcula cuando cambia
+la entrada o la salida, también al corregir. Los turnos registrados antes de
+V013 quedan con el evento vacío hasta que se corrija su horario.
+
+Los pendientes se aplican a nombre de quien los pidió, con
+`revisado_por = 'sistema: V012'`. Uno que ya no se puede aplicar, por ejemplo
+porque quedaría cruzado con otro turno, se cierra como rechazado con el error
+en `comentario_revision` y aparece en la pestaña con estado "No aplicado".
+
+Para volver a la regla anterior sin desplegar nada en la base:
+
+```sql
+update reglas_negocio set valor = 1 where clave = 'exigir_aprobacion_ajustes';
+update reglas_negocio set valor = 1 where clave = 'bloquear_periodos_cerrados';
+```
+
+El panel ya no tendría con qué aprobar ni cerrar meses: habría que restaurar
+`render_ajustes_pendientes` y `render_periodos` de `views/auditoria_panel.py`
+desde el commit anterior a V012.
+
 ## Decisiones pendientes
 
 El turnero es una herramienta interna de control: estas decisiones las toman
@@ -248,24 +301,19 @@ indicado, que se eligió para poder construir el mecanismo. Cambiarlas es un
 
 | Decisión | Valor provisional |
 |---|---|
-| Qué superadmins pueden aprobar ajustes | Nadie hasta que se configure `puede_aprobar` |
-| Qué superadmins cierran y reabren meses, y hasta qué día se cierra cada mes | Nadie hasta configurar `gestiona_periodos`; cierre manual. Pendiente con la gerencia: [pendientes/cierre_de_mes.md](../pendientes/cierre_de_mes.md) |
 | Qué superadmins ven la auditoría | Nadie hasta configurar `ver_auditoria` |
 | Duración máxima de un turno | 24 h |
 | Largo mínimo del motivo | 10 caracteres |
 | Si un permiso cuenta como horas en el comparativo | Cuenta, como hasta ahora |
 | Cuánto tiempo se conserva la bitácora | Indefinido; ver [seguridad/retencion_y_acceso.md](../seguridad/retencion_y_acceso.md) |
 
-Decidido el 2026-10-14: una corrección que quita más de 10 minutos de tiempo
-trabajado, o la anulación de un turno de trabajo de más de 10 minutos, necesita
-la aprobación de otro superadmin. Hasta 10 minutos, sumar tiempo o cambiar solo
-el comentario se aplica en el acto. Es la regla `tolerancia_recorte_min`, que
-reemplaza al umbral provisional de 1 h extra; ver
-[V011](versiones/V011__tolerancia_de_recorte.sql).
-
-Mientras nadie tenga `puede_aprobar`, los ajustes grandes quedan esperando sin
-que nadie los pueda resolver. Es intencional que no haya un aprobador por
-defecto, pero hay que configurarlo antes del paso 8.
+Decidido el 2026-10-21 con la gerencia y el jefe de carga, en reemplazo de lo
+decidido el 2026-10-14: ninguna corrección ni anulación necesita la aprobación
+de otro superadmin, y un mes cerrado no bloquea cambios. El control se hace
+después, sobre lo que queda registrado. Son las reglas
+`exigir_aprobacion_ajustes` y `bloquear_periodos_cerrados`, las dos en 0; ver
+[V012](versiones/V012__sin_aprobacion_ni_cierre.sql). `tolerancia_recorte_min`
+sigue en la tabla, pero solo para clasificar cada ajuste como menor o recorte.
 
 Para ver qué valores están vigentes:
 

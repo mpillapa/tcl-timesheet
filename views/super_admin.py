@@ -30,7 +30,7 @@ from core.traza import observacion_del_colaborador
 from core.employees import AREAS, EMPLEADOS_POR_AREA, AREA_DE
 from core.config import (
     UMBRAL_OLVIDO_H, TS_FMT, MIN_JUSTIF_CHARS, HORAS_BASE_TURNO,
-    SCOPE_POR_PADRON_VIGENTE,
+    SCOPE_POR_PADRON_VIGENTE, EVENTOS_DE_JORNADA,
 )
 from core.normalizacion import _normalizar_cmp, _normalizar_serie
 from core.marcado import guardar_salida, barrer_turnos_olvidados
@@ -67,10 +67,12 @@ SUBCATEGORIAS_EVENTO = [
 def _clase_de_turno(df: pd.DataFrame) -> pd.Series:
     """'vacaciones', 'evento' (falta o permiso) o 'trabajo' (turno normal),
     según la columna Evento. La llena la base al registrar la eventualidad
-    (V006), así que no depende de cómo empiece el texto de Observaciones."""
+    (V006), así que no depende de cómo empiece el texto de Observaciones. Los
+    eventos de jornada (V013) son turnos de trabajo."""
     evento = df["Evento"].fillna("").astype(str).str.strip()
     return evento.map(
-        lambda e: "trabajo" if not e else ("vacaciones" if e == EVENTO_VACACIONES else "evento")
+        lambda e: "trabajo" if not e or e in EVENTOS_DE_JORNADA
+        else ("vacaciones" if e == EVENTO_VACACIONES else "evento")
     )
 
 
@@ -2210,8 +2212,8 @@ def _dialogo_confirmar_edicion() -> None:
                 obs_final += f" | [Orig]: {obs_colaborador}"
 
             h = payload["horas_nuevas"]
-            # Un ajuste, no un UPDATE: la base decide si se aplica en el acto o
-            # si espera a otro administrador (migracion/versiones/V009).
+            # Un ajuste, no un UPDATE: se aplica en el acto y queda registrado
+            # con su motivo en ajustes_turno (migracion/versiones/V012).
             try:
                 res = solicitar_correccion(
                     payload["nombre"], payload["ts_entrada_str_orig"],
@@ -2224,13 +2226,7 @@ def _dialogo_confirmar_edicion() -> None:
             if res is None:
                 st.error("No se encontró el turno. Puede haber sido modificado. Recarga la página.")
                 return
-            if res["estado"] == "pendiente":
-                set_flash(
-                    f"Corrección de {payload['nombre']} enviada a aprobación: quita "
-                    f"{_dec_a_hhmm(-res['delta_horas'])} y necesita la firma de otro administrador."
-                )
-            else:
-                set_flash(f"Turno de {payload['nombre']} corregido · {_dec_a_hhmm(h)} trabajadas")
+            set_flash(f"Turno de {payload['nombre']} corregido · {_dec_a_hhmm(h)} trabajadas")
             st.session_state["_edit_pendiente"] = None
             st.session_state["_edit_rev"] = st.session_state.get("_edit_rev", 0) + 1
             st.rerun()
@@ -2251,8 +2247,8 @@ def _flujo_editar_turno(emp_corr, df: pd.DataFrame) -> None:
         "muestran turnos normales dentro de los filtros activos (las eventualidades "
         "no se editan aquí). Lo que marcó el colaborador se conserva aparte. Para "
         "cambiar solo el comentario, deja la fecha y la hora como están: el turno no "
-        "se mueve ni un segundo. Si la corrección quita más de 10 minutos, queda "
-        "esperando la aprobación de otro administrador."
+        "se mueve ni un segundo. La corrección se aplica en el acto y queda "
+        "registrada con tu usuario y el motivo."
     )
 
     if df is None or df.empty:
@@ -2381,9 +2377,7 @@ def _dialogo_confirmar_anulacion() -> None:
 
     st.warning(
         "El turno deja de contar, pero no se borra: queda anulado con tu usuario y "
-        "el motivo. Si es un turno de trabajo de más de 10 minutos, la anulación "
-        "espera la aprobación de otro administrador. Las eventualidades se anulan "
-        "en el acto."
+        "el motivo."
     )
 
     def _fila(label: str, valor: str, color: str = BRAND_NAVY) -> str:
@@ -2425,11 +2419,7 @@ def _dialogo_confirmar_anulacion() -> None:
             if res is None:
                 st.error("No se encontró el turno. Puede haber sido modificado. Recarga la página.")
                 return
-            if res["estado"] == "pendiente":
-                set_flash(f"Anulación del turno de {payload['nombre']} ({payload['fecha']}) "
-                          "enviada a aprobación de otro administrador")
-            else:
-                set_flash(f"Turno de {payload['nombre']} ({payload['fecha']}) anulado")
+            set_flash(f"Turno de {payload['nombre']} ({payload['fecha']}) anulado")
             st.session_state["_del_pendiente"] = None
             st.session_state["_del_rev"] = st.session_state.get("_del_rev", 0) + 1
             st.rerun()
@@ -2843,11 +2833,6 @@ def vista_super_admin() -> None:
     df_dash = _preparar_df_dashboard(df_scope)
 
     # Que se vean de entrada, sin llegar hasta la pestaña de gestión.
-    if auditoria_panel.permiso(admin_user, "puede_aprobar"):
-        n_aj = auditoria_panel.contar_pendientes_para(admin_user, areas_permitidas)
-        if n_aj:
-            st.warning(f"Hay **{n_aj} ajuste(s)** de otros administradores esperando tu aprobación "
-                       "en la pestaña **Ajustes y auditoría**.")
     n_rev = int((df_dash["Estado"] == "Revision").sum())
     if n_rev:
         if solo_lectura:
@@ -2900,17 +2885,14 @@ def vista_super_admin() -> None:
                         set_flash(f"{_res['archivadas']} registro(s) archivados.")
                         st.rerun()
 
-    # La pestaña de ajustes y auditoría la ve quien puede aprobar, gestionar
-    # periodos o auditar, y quien puede corregir, para seguir sus solicitudes.
+    # El registro de modificaciones lo ve solo quien tiene ver_auditoria.
     ver_auditoria = auditoria_panel.permiso(admin_user, "ver_auditoria")
-    gestiona_periodos = auditoria_panel.permiso(admin_user, "gestiona_periodos")
-    con_pestana_ajustes = (not solo_lectura) or ver_auditoria or gestiona_periodos
 
     nombres = ["Dashboard", "Comparativo horas esperadas", "Tabla"]
     if not solo_lectura:
         nombres += ["Gestión de turnos", "Eventualidades"]
-    if con_pestana_ajustes:
-        nombres.append("Ajustes y auditoría")
+    if ver_auditoria:
+        nombres.append("Modificaciones de turnos")
     pestanas = dict(zip(nombres, st.tabs(nombres)))
 
     with pestanas["Dashboard"]:
@@ -2924,13 +2906,6 @@ def vista_super_admin() -> None:
             _render_correcciones(areas_permitidas=areas_permitidas, df_filt=df_filt)
         with pestanas["Eventualidades"]:
             _render_eventualidades()
-    if con_pestana_ajustes:
-        with pestanas["Ajustes y auditoría"]:
-            if not solo_lectura:
-                auditoria_panel.render_ajustes_pendientes(admin_user, areas_permitidas)
-                st.divider()
-            if gestiona_periodos or ver_auditoria:
-                auditoria_panel.render_periodos(admin_user)
-                st.divider()
-            if ver_auditoria:
-                auditoria_panel.render_auditoria(areas_permitidas)
+    if ver_auditoria:
+        with pestanas["Modificaciones de turnos"]:
+            auditoria_panel.render_auditoria(areas_permitidas)

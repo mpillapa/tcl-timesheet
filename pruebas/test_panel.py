@@ -2,8 +2,8 @@
 
 Usa AppTest de Streamlit contra la base de pruebas, con administradores y
 padrón ficticios inyectados como secrets. Comprueba que la vista arranca sin
-errores con el esquema nuevo y que el flujo de aprobación funciona desde la
-pantalla, no solo desde la capa de datos.
+errores con el esquema nuevo y que la pestaña de modificaciones muestra lo
+que se corrigió, sin flujo de aprobación.
 """
 
 from datetime import date
@@ -20,9 +20,8 @@ MOTIVO = "Cierre de vuelo confirmado con operaciones"
 # uno que no esté ahí no ve ningún área. Las credenciales son ficticias.
 SECRETS = {
     "super_admins": {
-        "fherrera": {"password": "x", "nombre": "Admin Prueba A", "rol": "Supervisor", "puede_aprobar": True},
-        "mpillapa": {"password": "x", "nombre": "Admin Prueba B", "rol": "Jefatura", "puede_aprobar": True,
-                    "gestiona_periodos": True, "ver_auditoria": True},
+        "fherrera": {"password": "x", "nombre": "Admin Prueba A", "rol": "Supervisor"},
+        "mpillapa": {"password": "x", "nombre": "Admin Prueba B", "rol": "Jefatura", "ver_auditoria": True},
     },
     "empleados": {
         "1111": {"nombre": "Prueba Uno", "area": "BODEGA"},
@@ -54,52 +53,53 @@ def _app(usuario):
 
 
 @pytest.fixture
-def recorte_pendiente(datos, base_b):
+def recorte(datos, base_b):
+    """Un recorte de 2:30 h hecho por fherrera, que se aplica en el acto."""
     tid = insertar_turno(base_b, entrada="2026-09-10 08:00:00", salida="2026-09-10 19:30:00")
     with base_b.cursor("turnero_app") as cur:
-        cur.execute("select id from solicitar_correccion(%s, '2026-09-10 08:00', '2026-09-10 17:00', null, %s, 'fherrera')",
+        cur.execute("select id, estado from solicitar_correccion(%s, '2026-09-10 08:00', '2026-09-10 17:00', null, %s, 'fherrera')",
                     (tid, MOTIVO))
-        return cur.fetchone()[0]
+        aid, estado = cur.fetchone()
+    assert estado == "aplicado"
+    return aid
 
 
 def _textos(elementos):
     return " ".join(str(e.value) for e in elementos)
 
 
-def test_el_aprobador_ve_el_ajuste_y_lo_aprueba(recorte_pendiente, base_b):
+def test_no_queda_rastro_del_flujo_de_aprobacion(recorte):
     at = _app("mpillapa").run()
     assert not at.exception, at.exception
-    assert "esperando tu aprobación" in _textos(at.warning)
-    assert "Ajustes y auditoría" in [t.label for t in at.tabs]
-
-    aprobar = [b for b in at.button if b.label == "Aprobar"]
-    assert len(aprobar) == 1
-    aprobar[0].click().run()
-    assert not at.exception, at.exception
-    assert base_b.uno("select estado, revisado_por from ajustes_turno where id = %s",
-                      (recorte_pendiente,)) == ("aplicado", "mpillapa")
+    assert "aprobación" not in _textos(at.warning)
+    assert not [b for b in at.button if b.label in ("Aprobar", "Rechazar")]
+    assert "Ajustes y auditoría" not in [t.label for t in at.tabs]
 
 
-def test_quien_solicito_no_ve_boton_para_aprobarse(recorte_pendiente):
+def test_sin_ver_auditoria_no_se_ve_la_pestana(recorte):
     at = _app("fherrera").run()
     assert not at.exception, at.exception
-    assert not [b for b in at.button if b.label == "Aprobar"]
-    assert "solicitud(es) tuya(s)" in _textos(at.info)
+    assert "Modificaciones de turnos" not in [t.label for t in at.tabs]
 
 
-def test_la_auditoria_muestra_el_horario_cambiado(datos, base_b):
-    tid = insertar_turno(base_b, entrada="2026-09-10 08:00:00", salida="2026-09-10 19:30:00")
-    with base_b.cursor("turnero_app") as cur:
-        cur.execute("select id from solicitar_correccion(%s, '2026-09-10 08:00', '2026-09-10 17:00', null, %s, 'fherrera')",
-                    (tid, MOTIVO))
-        cur.execute("select aprobar_ajuste(%s, 'mpillapa', '')", (cur.fetchone()[0],))
-
+def test_la_pestana_muestra_la_modificacion_y_el_horario_cambiado(recorte):
     at = _app("mpillapa")
     at.run()
-    # La auditoría filtra desde hace 60 días; el turno de prueba es de
-    # septiembre de 2026, así que se amplía el rango.
+    assert "Modificaciones de turnos" in [t.label for t in at.tabs]
+    # Filtra desde hace 60 días; el turno de prueba es de septiembre de 2026,
+    # así que se amplía el rango.
     at.date_input(key="aud_desde").set_value(date(2026, 1, 1)).run()
     assert not at.exception, at.exception
     metricas = {m.label: m.value for m in at.metric}
+    assert metricas["Modificaciones"] == "1"
+    assert metricas["Tiempo quitado"] == "-2:30"
     assert metricas["Turnos con horario cambiado"] == "1"
     assert metricas["Horas extra quitadas"] == "2.50 h"
+
+    tablas = [df.value for df in at.dataframe]
+    modificaciones = next(t for t in tablas if "Hecho por" in t.columns)
+    fila = modificaciones.iloc[0]
+    assert (fila["Funcionario"], fila["Hecho por"], fila["Motivo"]) == ("Prueba Uno", "fherrera", MOTIVO)
+    assert (fila["Antes"], fila["Después"], fila["Horas"]) == (
+        "2026-09-10 08:00 → 2026-09-10 19:30", "2026-09-10 08:00 → 2026-09-10 17:00", "-2:30")
+    assert "Estado" not in modificaciones.columns

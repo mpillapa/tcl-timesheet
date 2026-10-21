@@ -231,7 +231,7 @@ def datos(base_b, monkeypatch):
     db._engine = None
     # Doble seguro además de TURNERO_SIN_ESPEJO: nada sale hacia Google Sheets.
     monkeypatch.setattr(data.sheets_backup, "espejo_habilitado", lambda: False)
-    for f in (data.leer_registros, data.leer_historico, data.leer_ajustes, data.leer_periodos,
+    for f in (data.leer_registros, data.leer_historico, data.leer_ajustes,
               data.leer_diferencias_marcacion, data.leer_bitacora_supervision):
         f.clear()
     yield data

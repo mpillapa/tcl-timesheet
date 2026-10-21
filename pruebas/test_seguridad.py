@@ -60,6 +60,7 @@ def test_la_aplicacion_no_puede_borrar_turnos(base_a):
     "insert into marcaciones (turno_id, nombre, tipo, momento, origen) values (1, 'x', 'entrada', now(), 'admin')",
     "select * from herramientas.ajena",
     "select _aplicar_ajuste(1, 'x', 'x')",
+    "select aplicar_ajustes_pendientes('x')",
 ])
 def test_la_aplicacion_no_alcanza_lo_que_no_le_toca(base_a, sentencia):
     with pytest.raises(psycopg2.errors.InsufficientPrivilege):
@@ -76,7 +77,8 @@ def test_la_api_rest_no_alcanza_las_funciones_que_escriben(base_a):
     # anon es el rol de la clave pública de Supabase.
     for firma in ["solicitar_correccion(bigint, timestamp, timestamp, text, text, text)",
                   "solicitar_anulacion(bigint, text, text)", "aprobar_ajuste(bigint, text, text)",
-                  "cerrar_periodo(int, int, text, text)", "reabrir_periodo(int, int, text, text)"]:
+                  "cerrar_periodo(int, int, text, text)", "reabrir_periodo(int, int, text, text)",
+                  "aplicar_ajustes_pendientes(text)"]:
         assert base_a.uno("select has_function_privilege('anon', %s, 'execute')", (firma,))[0] is False
 
 

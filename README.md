@@ -39,7 +39,7 @@ Super admin. Ingresa con usuario y contraseña. Tiene hasta seis pestañas:
 | Tabla | Detalle de los turnos filtrados, con descarga a CSV |
 | Gestión de turnos | Cierre de turnos en revisión, registro manual de entradas o turnos históricos, edición y anulación |
 | Eventualidades | Registro de faltas justificadas, permisos y vacaciones por rango de fechas |
-| Ajustes y auditoría | Ajustes pendientes de aprobación, cierre y reapertura de periodos, y lo marcado contra lo vigente. La ven los admins que no son de solo lectura y, entre los de solo lectura, quien tiene `ver_auditoria` o `gestiona_periodos` |
+| Modificaciones de turnos | Cada corrección y anulación con el horario de antes y el de después, quién, cuándo y por qué; lo marcado contra lo vigente; y la bitácora. Solo la ve quien tiene `ver_auditoria` |
 
 Cada admin ve solo las áreas que tiene asignadas en `AREAS_POR_ADMIN`
 (`views/super_admin.py`). Los usuarios marcados con `solo_lectura = true` en la
@@ -213,15 +213,20 @@ Las tablas, una vez aplicadas:
 - `turnos`, el turno vigente, el que se paga. Un turno no se borra, se anula.
 - `marcaciones`, lo que se marcó en el reloj, en una tabla que no se puede
   editar. La diferencia con `turnos` es exactamente lo que se corrigió.
-- `ajustes_turno`, cada corrección y anulación con su motivo y, si quita más
-  de 10 minutos de tiempo trabajado, la aprobación de otro administrador
-  (regla `tolerancia_recorte_min`, V011).
+- `ajustes_turno`, cada corrección y anulación con su motivo, el estado de
+  antes y lo que se cambió. Se aplica en el acto, sin aprobación (V012).
 - `turnos_auditoria`, la bitácora: cada cambio con la fila antes y después, el
   autor, el origen y el motivo. De solo inserción. Existe desde el 2026-09-02,
   después de una auditoría que no pudo medir las horas modificadas porque la
   base no guardaba el valor anterior; ver [auditoria/README.md](auditoria/README.md).
+- En `turnos`, la columna `evento` dice qué es cada fila. En una eventualidad,
+  su tipo (vacaciones, permiso, falta). En un turno trabajado, cómo terminó:
+  "Turno completo sin novedad" hasta 9 h, "Turno completo con tolerancia de
+  horas extra" hasta 9 h 30, y vacío si pasó de ahí y lleva justificación
+  (V013). La tolerancia no quita horas extra.
 - `periodos_nomina` y `periodos_eventos`, el cierre de cada mes y cada
-  reapertura.
+  reapertura. Desde V012 un mes cerrado no bloquea cambios y el panel no
+  ofrece cerrar meses.
 - `empleados` y `ausencias`, la identidad de cada persona y las solicitudes de
   permisos, faltas y vacaciones.
 - `reglas_negocio` y `horas_esperadas`, parámetros y metas.
@@ -286,11 +291,11 @@ local y no viajan por el repositorio. Cada push a `main` redespliega.
 - La fase A de las migraciones está aplicada en producción desde el
   2026-10-13. La fase B, que obliga a corregir solo mediante ajustes y exige
   motivo a toda escritura de un administrador, todavía no.
-- Una corrección que quita más de 10 minutos necesita la aprobación de otro
-  superadmin (V011, decidido el 2026-10-14). Siguen provisionales la duración
-  máxima, quién aprueba y quién cierra meses. Los deciden los
-  superadmins responsables del turnero; la lista está en
-  [migracion/README.md](migracion/README.md).
+- Las correcciones y anulaciones no necesitan aprobación ni las bloquea un
+  mes cerrado (V012, decidido el 2026-10-21 con la gerencia y el jefe de
+  carga). El control es posterior, sobre lo que queda registrado en la pestaña
+  "Modificaciones de turnos". Siguen provisionales la duración máxima y el largo
+  mínimo del motivo; la lista está en [migracion/README.md](migracion/README.md).
 - La identidad de quien hace cada cambio la pone la aplicación, a partir de
   usuarios y contraseñas en secrets. La base la registra, pero no la verifica.
 

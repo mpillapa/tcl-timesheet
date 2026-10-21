@@ -15,12 +15,12 @@ def test_la_marcacion_original_sobrevive_a_la_correccion(base_b):
     tid = insertar_turno(base_b, entrada="2026-09-09 09:13:29")
     with base_b.cursor("turnero_app", sello=("Prueba Uno", "colaborador")) as cur:
         cur.execute("update turnos set ts_salida = '2026-09-10 00:03:58', estado = 'Completo' where id = %s", (tid,))
-    # El caso de septiembre: el turno se reescribe entero, con aprobación.
+    # El caso de septiembre: el turno se reescribe entero. Desde V012 se
+    # aplica en el acto, y la marcación original tiene que seguir ahí.
     with base_b.cursor("turnero_app") as cur:
-        cur.execute("select id from solicitar_correccion(%s, '2026-09-09 00:12', '2026-09-09 09:12', null, %s, 'admin_a')",
+        cur.execute("select estado from solicitar_correccion(%s, '2026-09-09 00:12', '2026-09-09 09:12', null, %s, 'admin_a')",
                     (tid, MOTIVO))
-        aid = cur.fetchone()[0]
-        cur.execute("select aprobar_ajuste(%s, 'admin_b', '')", (aid,))
+        assert cur.fetchone()[0] == "aplicado"
 
     assert _marcaciones(base_b, tid) == [
         ("entrada", "2026-09-09 09:13:29", "colaborador"),
