@@ -33,9 +33,10 @@ UMBRAL_OLVIDO_H = 15
 UMBRAL_HORAS_EXTRA = 9.5
 MIN_JUSTIF_CHARS = 10
 
-# Evento que la base pone a un turno de trabajo al cerrarse (V013): hasta la
-# jornada, sin novedad; hasta UMBRAL_HORAS_EXTRA, con tolerancia; más, vacío,
-# porque lleva justificación. No son eventualidades: cuentan como trabajo.
+# Evento que la base pone a un turno de trabajo al cerrarse (V013, V015): solo
+# entre la jornada y UMBRAL_HORAS_EXTRA, con tolerancia; si no, vacío. Sin
+# novedad lo usó V013 hasta el 2026-10-28 y V015 lo retiró; se conserva para
+# que un turno que aún lo lleve cuente como trabajo y no como eventualidad.
 EVENTO_SIN_NOVEDAD = "Turno completo sin novedad"
 EVENTO_TOLERANCIA = "Turno completo con tolerancia de horas extra"
 EVENTOS_DE_JORNADA = {EVENTO_SIN_NOVEDAD, EVENTO_TOLERANCIA}

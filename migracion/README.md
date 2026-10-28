@@ -25,7 +25,7 @@ productivo aprobado por Tecnología. La última sección dice qué falta para es
 | Un permiso se reconoce por el texto de la observación | Tiene tipo y está atado a su solicitud en `ausencias` |
 | Las horas se guardan sin zona | Se guardan como instante (`timestamptz`) |
 | Los umbrales viven solo en el código | Están en `reglas_negocio`, con su estado de decisión |
-| Esquema pegado a mano, sin pruebas | Migraciones numeradas y 100 pruebas contra una base local |
+| Esquema pegado a mano, sin pruebas | Migraciones numeradas y 102 pruebas contra una base local |
 
 ### Las tablas
 
@@ -58,6 +58,8 @@ productivo aprobado por Tecnología. La última sección dice qué falta para es
 | [V011](versiones/V011__tolerancia_de_recorte.sql) | A | La aprobación se mide en minutos quitados, con 10 min de tolerancia |
 | [V012](versiones/V012__sin_aprobacion_ni_cierre.sql) | A | Los ajustes se aplican en el acto y un mes cerrado no bloquea; aplica los pendientes |
 | [V013](versiones/V013__evento_de_jornada.sql) | A | El evento de un turno trabajado según su duración: sin novedad, con tolerancia o vacío |
+| [V014](versiones/V014__evento_de_jornada_sep_oct.sql) | A | La regla de V013 para los turnos de septiembre y octubre de 2026 ya cerrados |
+| [V015](versiones/V015__solo_tolerancia.sql) | A | Solo la tolerancia lleva evento: hasta 9 h queda vacío, también en lo ya marcado |
 | [V101](versiones/V101__exigir_ajustes_y_motivo.sql) | B | Enciende la obligación de ajuste y de motivo |
 | [V102](versiones/V102__horarios_con_zona.sql) | B | Entrada y salida a `timestamptz` |
 
@@ -267,13 +269,33 @@ Desde V013, al cerrarse un turno de trabajo la base llena `evento`:
 
 | Duración | Evento |
 |---|---|
-| Hasta 9 h | Turno completo sin novedad |
+| Hasta 9 h | Vacío (desde V015; V013 ponía "Turno completo sin novedad") |
 | Más de 9 h y hasta 9 h 30 | Turno completo con tolerancia de horas extra |
 | Más de 9 h 30 | Vacío: lleva la justificación del colaborador |
 
 Es una etiqueta: las horas extra se calculan igual. Se recalcula cuando cambia
-la entrada o la salida, también al corregir. Los turnos registrados antes de
-V013 quedan con el evento vacío hasta que se corrija su horario.
+la entrada o la salida, también al corregir. Los turnos de septiembre y octubre
+de 2026 registrados antes de V013 los llena V014, con la misma regla; los
+anteriores a septiembre quedan con el evento vacío hasta que se corrija su
+horario.
+
+### V014
+
+Aplica el evento de jornada a los turnos de trabajo de septiembre y octubre de
+2026 que ya estaban cerrados. Solo cambia `evento`; las horas no se mueven. Al
+2026-10-21 eran 1307 turnos: 929 sin novedad y 378 con tolerancia. Otros 595
+siguen vacíos por pasar de 9 h 30. Cada cambio queda en la bitácora como
+`sistema`, usuario `migracion V014`. No necesita push: el código desplegado ya
+la entiende.
+
+### V015
+
+Decidido el 2026-10-28: solo la tolerancia lleva evento. La regla deja vacío el
+turno de 9 h o menos, y la migración vacía los que V013 y V014 ya habían marcado
+como sin novedad: 554 de septiembre y 523 de octubre al 2026-10-28. Los 445 con
+tolerancia no cambian. Solo cambia `evento`; cada cambio queda en la bitácora
+como `sistema`, usuario `migracion V015`. Tampoco necesita push para
+funcionar.
 
 Los pendientes se aplican a nombre de quien los pidió, con
 `revisado_por = 'sistema: V012'`. Uno que ya no se puede aplicar, por ejemplo
