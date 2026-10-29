@@ -9,7 +9,8 @@ import pytest
 from conftest import insertar_turno
 
 SIN_NOVEDAD = "Turno completo sin novedad"
-TOLERANCIA = "Turno completo con tolerancia de horas extra"
+TOLERANCIA = "TOLERANCIA"
+TOLERANCIA_ANTERIOR = "Turno completo con tolerancia de horas extra"
 MOTIVO = "Cierre de vuelo confirmado con operaciones"
 
 
@@ -86,8 +87,9 @@ def test_dos_turnos_con_evento_de_jornada_siguen_sin_poder_cruzarse(base_a):
 def test_el_panel_los_cuenta_como_trabajo():
     import pandas as pd
     from views.super_admin import _clase_de_turno
-    df = pd.DataFrame({"Evento": [SIN_NOVEDAD, TOLERANCIA, "", "Vacaciones", "Solicitud de permiso"]})
-    assert list(_clase_de_turno(df)) == ["trabajo", "trabajo", "trabajo", "vacaciones", "evento"]
+    df = pd.DataFrame({"Evento": [SIN_NOVEDAD, TOLERANCIA, TOLERANCIA_ANTERIOR, "",
+                                  "Vacaciones", "Solicitud de permiso"]})
+    assert list(_clase_de_turno(df)) == ["trabajo", "trabajo", "trabajo", "trabajo", "vacaciones", "evento"]
 
 
 def test_v014_llena_septiembre_y_octubre_y_nada_mas(servidor, base_a):
@@ -147,3 +149,32 @@ def test_v015_vacia_los_sin_novedad_y_deja_la_tolerancia(servidor, base_a):
     assert base_a.uno(
         "select usuario, origen from turnos_auditoria where turno_id = %s order by id desc limit 1",
         (corto,)) == ("migracion V015", "sistema")
+
+
+def test_v016_pone_tolerancia_en_todo_el_historico(servidor, base_a):
+    from conftest import aplicar_migraciones
+    # Como quedó producción después de V015.
+    sep_largo = insertar_turno(base_a, entrada="2026-09-11 08:00:00", salida="2026-09-11 17:20:00")
+    may_vacio = insertar_turno(base_a, entrada="2026-05-12 08:00:00", salida="2026-05-12 17:15:00")
+    may_corto = insertar_turno(base_a, entrada="2026-05-13 08:00:00", salida="2026-05-13 16:00:00")
+    may_largo = insertar_turno(base_a, entrada="2026-05-14 08:00:00", salida="2026-05-14 19:00:00")
+    abierto = insertar_turno(base_a, entrada="2026-05-15 08:00:00")
+    vac = insertar_turno(base_a, nombre="Prueba Dos", entrada="2026-05-12 08:00:00",
+                         salida="2026-05-12 17:15:00", observaciones="Vacaciones: 2026-05-12")
+    with base_a.cursor("propietario") as cur:
+        cur.execute("alter table turnos disable trigger tg_turnos_35_evento_jornada")
+        cur.execute("update turnos set evento = %s where id = %s", (TOLERANCIA_ANTERIOR, sep_largo))
+        cur.execute("update turnos set evento = '' where id = %s", (may_vacio,))
+        cur.execute("alter table turnos enable trigger tg_turnos_35_evento_jornada")
+    horas_antes = base_a.todos("select id, horas_trabajadas, horas_extra from turnos order by id")
+
+    base_a.uno("delete from schema_migraciones where version = 'V016' returning 1")
+    res = aplicar_migraciones(servidor, base_a.nombre, "A")
+    assert res.returncode == 0, res.stdout + res.stderr
+
+    assert [_evento(base_a, t) for t in (sep_largo, may_vacio, may_corto, may_largo, abierto, vac)] == [
+        TOLERANCIA, TOLERANCIA, "", "", "", "Vacaciones"]
+    assert base_a.todos("select id, horas_trabajadas, horas_extra from turnos order by id") == horas_antes
+    assert base_a.uno(
+        "select usuario, origen from turnos_auditoria where turno_id = %s order by id desc limit 1",
+        (may_vacio,)) == ("migracion V016", "sistema")

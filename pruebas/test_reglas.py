@@ -13,8 +13,7 @@ def test_las_reglas_vigentes_coinciden_con_core_config(base_a):
     assert float(reglas["almuerzo_h"]) == config.HORAS_ALMUERZO
     assert float(reglas["min_horas_para_almuerzo"]) == config.MIN_HORAS_ALMUERZO
     assert float(reglas["tolerancia_horas_extra_h"]) == config.UMBRAL_HORAS_EXTRA - config.HORAS_BASE_TURNO
-    assert base_a.uno("select evento_sin_novedad(), evento_con_tolerancia()") == (
-        config.EVENTO_SIN_NOVEDAD, config.EVENTO_TOLERANCIA)
+    assert base_a.uno("select evento_con_tolerancia()")[0] == config.EVENTO_TOLERANCIA
 
 
 def test_las_horas_las_calcula_la_base(base_a):

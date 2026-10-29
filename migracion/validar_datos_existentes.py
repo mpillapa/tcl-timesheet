@@ -34,7 +34,7 @@ DURACION_MAXIMA_POR_DEFECTO = 24
 # V013. El %% es un % escapado: las consultas van con parámetros y psycopg2
 # reserva el % para marcarlos.
 ES_TRABAJO = """
-    coalesce(evento, '') in ('', 'Turno completo sin novedad', 'Turno completo con tolerancia de horas extra')
+    coalesce(evento, '') in ('', 'TOLERANCIA', 'Turno completo sin novedad', 'Turno completo con tolerancia de horas extra')
     and translate(lower(observaciones), 'áéíóú', 'aeiou') not similar to
         '(vacaciones|justificacion de falta|solicitud de permiso)%%'
 """

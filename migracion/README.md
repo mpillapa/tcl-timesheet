@@ -25,7 +25,7 @@ productivo aprobado por Tecnología. La última sección dice qué falta para es
 | Un permiso se reconoce por el texto de la observación | Tiene tipo y está atado a su solicitud en `ausencias` |
 | Las horas se guardan sin zona | Se guardan como instante (`timestamptz`) |
 | Los umbrales viven solo en el código | Están en `reglas_negocio`, con su estado de decisión |
-| Esquema pegado a mano, sin pruebas | Migraciones numeradas y 102 pruebas contra una base local |
+| Esquema pegado a mano, sin pruebas | Migraciones numeradas y 103 pruebas contra una base local |
 
 ### Las tablas
 
@@ -60,6 +60,7 @@ productivo aprobado por Tecnología. La última sección dice qué falta para es
 | [V013](versiones/V013__evento_de_jornada.sql) | A | El evento de un turno trabajado según su duración: sin novedad, con tolerancia o vacío |
 | [V014](versiones/V014__evento_de_jornada_sep_oct.sql) | A | La regla de V013 para los turnos de septiembre y octubre de 2026 ya cerrados |
 | [V015](versiones/V015__solo_tolerancia.sql) | A | Solo la tolerancia lleva evento: hasta 9 h queda vacío, también en lo ya marcado |
+| [V016](versiones/V016__evento_tolerancia.sql) | A | El evento se llama TOLERANCIA y se aplica a todo el histórico |
 | [V101](versiones/V101__exigir_ajustes_y_motivo.sql) | B | Enciende la obligación de ajuste y de motivo |
 | [V102](versiones/V102__horarios_con_zona.sql) | B | Entrada y salida a `timestamptz` |
 
@@ -270,7 +271,7 @@ Desde V013, al cerrarse un turno de trabajo la base llena `evento`:
 | Duración | Evento |
 |---|---|
 | Hasta 9 h | Vacío (desde V015; V013 ponía "Turno completo sin novedad") |
-| Más de 9 h y hasta 9 h 30 | Turno completo con tolerancia de horas extra |
+| Más de 9 h y hasta 9 h 30 | TOLERANCIA (desde V016; antes "Turno completo con tolerancia de horas extra") |
 | Más de 9 h 30 | Vacío: lleva la justificación del colaborador |
 
 Es una etiqueta: las horas extra se calculan igual. Se recalcula cuando cambia
@@ -296,6 +297,16 @@ como sin novedad: 554 de septiembre y 523 de octubre al 2026-10-28. Los 445 con
 tolerancia no cambian. Solo cambia `evento`; cada cambio queda en la bitácora
 como `sistema`, usuario `migracion V015`. Tampoco necesita push para
 funcionar.
+
+### V016
+
+Decidido el 2026-10-29: el evento se llama TOLERANCIA y vale para toda la base.
+Cambia el texto largo en los 449 turnos de septiembre y octubre que lo tenían, y
+lo pone en 976 turnos de mayo a agosto que estaban en el rango con el evento
+vacío. Solo cambia `evento`; cada cambio queda en la bitácora como `sistema`,
+usuario `migracion V016`. Primero el push y después la migración: el panel
+anterior no conoce TOLERANCIA y la contaría como una ausencia, mientras que el
+nuevo entiende el texto anterior y el nuevo.
 
 Los pendientes se aplican a nombre de quien los pidió, con
 `revisado_por = 'sistema: V012'`. Uno que ya no se puede aplicar, por ejemplo

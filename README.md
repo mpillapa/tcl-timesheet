@@ -221,7 +221,7 @@ Las tablas, una vez aplicadas:
   base no guardaba el valor anterior; ver [auditoria/README.md](auditoria/README.md).
 - En `turnos`, la columna `evento` dice qué es cada fila. En una eventualidad,
   su tipo (vacaciones, permiso, falta). En un turno trabajado, solo se marca
-  la tolerancia: "Turno completo con tolerancia de horas extra" si duró más de
+  la tolerancia: "TOLERANCIA" si duró más de
   9 h y hasta 9 h 30. Hasta 9 h, o si pasó de 9 h 30 y lleva justificación,
   queda vacío (V013, V015). La tolerancia no quita horas extra.
 - `periodos_nomina` y `periodos_eventos`, el cierre de cada mes y cada
